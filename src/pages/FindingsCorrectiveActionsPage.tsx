@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
   AlertTriangle,
@@ -22,11 +22,13 @@ import {
   Plus,
   PlusCircle,
   RefreshCw,
+  RotateCcw,
   Shield,
   Sparkles,
   TableProperties,
   Terminal,
   Timer,
+  Trash2,
   TrendingUp,
   X,
 } from 'lucide-react';
@@ -106,6 +108,7 @@ interface UnifiedFinding {
   status: FindingStatus;
   actionType: 'Verify' | 'Update' | 'Close' | 'Inspect';
   managementResponse: string | null;
+  rejectionReason: string | null;
   signedOffBy: string | null;
   signedOffAt: string | null;
   recommendations: RecommendationOut[];
@@ -129,6 +132,7 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
   onNotify,
 }) => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { mode, hasRole, user } = useAuth();
   const { refresh: refreshNotifications } = useNotifications();
 
@@ -165,6 +169,12 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteInput, setNoteInput] = useState('');
 
+  // Verification Rejection Modal & Delete Confirmations
+  const [rejectModalOpen, setRejectModalOpen] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
+  const [confirmDeleteFinding, setConfirmDeleteFinding] = useState(false);
+  const [confirmDeleteActionId, setConfirmDeleteActionId] = useState<string | null>(null);
+
   // Log New Finding Modal
   const [logFindingOpen, setLogFindingOpen] = useState(false);
   const [newFindingAuditId, setNewFindingAuditId] = useState('');
@@ -194,6 +204,8 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
   const canCreateFinding = hasRole('Admin', 'Auditor');
   const canVerifyActions = hasRole('Admin', 'Auditor');
   const canSignOff = hasRole('Admin', 'Management');
+  const canRejectVerification = hasRole('Admin', 'Auditor', 'Management');
+  const canDeleteFinding = hasRole('Admin', 'Auditor');
   const canSubmitForVerification = hasRole('Auditor');
 
   const fetchFindingsData = useCallback(async () => {
@@ -215,25 +227,52 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
       setDepartments(deptRes);
       setOrgUsers(usersRes);
 
-      if (!newFindingAuditId && audRes.items.length > 0) {
-        setNewFindingAuditId(audRes.items[0].id);
+      if (audRes.items.length > 0) {
+        setNewFindingAuditId((prev) => prev || audRes.items[0].id);
+        setNewFindingDeptId((prev) => prev || audRes.items[0].department_id || deptRes[0]?.id || '');
+      } else if (deptRes.length > 0) {
+        setNewFindingDeptId((prev) => prev || deptRes[0].id);
       }
-      if (!newFindingDeptId && deptRes.length > 0) {
-        setNewFindingDeptId(deptRes[0].id);
-      }
-      if (fndRes.items.length > 0 && !fndRes.items.some((f) => f.id === selectedFindingId)) {
-        setSelectedFindingId(fndRes.items[0].id);
+      if (fndRes.items.length > 0) {
+        setSelectedFindingId((prev) =>
+          prev && fndRes.items.some((f) => f.id === prev) ? prev : fndRes.items[0].id
+        );
       }
     } catch (err) {
       setErrorMsg(err instanceof ApiError ? err.detail : 'Failed to load findings register.');
     } finally {
       setLoading(false);
     }
-  }, [mode, newFindingAuditId, newFindingDeptId, selectedFindingId]);
+  }, [mode]);
 
   useEffect(() => {
     void fetchFindingsData();
   }, [fetchFindingsData]);
+
+  // Support deep-link from Audit Checklists "Raise Finding" button (?openLog=1&auditId=...&title=...)
+  useEffect(() => {
+    const openLog = searchParams.get('openLog');
+    if (openLog !== '1') return;
+
+    const auditIdParam = searchParams.get('auditId');
+    const titleParam = searchParams.get('title');
+    if (canCreateFinding) {
+      if (titleParam) setNewFindingTitle(titleParam);
+      if (auditIdParam) {
+        setNewFindingAuditId(auditIdParam);
+        const matchedAudit = audits.find((a) => a.id === auditIdParam);
+        if (matchedAudit) {
+          setNewFindingDeptId(matchedAudit.department_id);
+        }
+      }
+      setLogFindingOpen(true);
+    }
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('openLog');
+    nextParams.delete('auditId');
+    nextParams.delete('title');
+    setSearchParams(nextParams, { replace: true });
+  }, [searchParams, setSearchParams, audits, canCreateFinding]);
 
   const unifiedFindings: UnifiedFinding[] = useMemo(() => {
     if (mode === 'api') {
@@ -283,6 +322,7 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
           status: f.status,
           actionType,
           managementResponse: f.management_response,
+          rejectionReason: f.rejection_reason ?? null,
           signedOffBy: f.signed_off_by_name,
           signedOffAt: f.signed_off_at,
           recommendations: f.recommendations,
@@ -339,6 +379,7 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
         status: f.status,
         actionType: f.actionType,
         managementResponse: null,
+        rejectionReason: null,
         signedOffBy: null,
         signedOffAt: null,
         recommendations: [],
@@ -503,6 +544,8 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
     setAddActionOpen(false);
     setAddRecOpen(false);
     setRespondingRecId(null);
+    setConfirmDeleteFinding(false);
+    setConfirmDeleteActionId(null);
     setDrawerOpen(true);
   };
 
@@ -749,6 +792,109 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
       await fetchFindingsData();
     } catch (err) {
       onNotify(err instanceof ApiError ? err.detail : 'Failed to save management note.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleRejectVerification = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedFinding || !canRejectVerification) return;
+    const reason = rejectReason.trim();
+    if (reason.length < 3) {
+      onNotify('Provide a clear rejection reason of at least 3 characters.');
+      return;
+    }
+
+    if (mode === 'demo') {
+      setDemoFindings((prev) =>
+        prev.map((f) =>
+          f.id === selectedFinding.id
+            ? {
+                ...f,
+                status: 'In Progress',
+                progressLabel: 'Active',
+                actionType: 'Update',
+              }
+            : f
+        )
+      );
+      setRejectReason('');
+      setRejectModalOpen(false);
+      onNotify(`Verification rejected for ${selectedFinding.code}; returned to In Progress (Demo).`);
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await apiClient.put<FindingOut>(`/findings/${selectedFinding.id}`, {
+        status: 'In Progress',
+        rejection_reason: reason,
+      });
+      setRejectReason('');
+      setRejectModalOpen(false);
+      onNotify(`Rejected verification & reopened ${selectedFinding.code} to In Progress.`);
+      await fetchFindingsData();
+      await refreshNotifications();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to reject verification.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDeleteFinding = async () => {
+    if (!selectedFinding || !canDeleteFinding || selectedFinding.status === 'Closed') return;
+
+    if (mode === 'demo') {
+      setDemoFindings((prev) => prev.filter((f) => f.id !== selectedFinding.id));
+      setConfirmDeleteFinding(false);
+      setDrawerOpen(false);
+      onNotify(`Deleted non-closed finding ${selectedFinding.code} (Demo).`);
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await apiClient.delete(`/findings/${selectedFinding.id}`);
+      const deletedCode = selectedFinding.code;
+      setConfirmDeleteFinding(false);
+      setDrawerOpen(false);
+      onNotify(`Deleted non-closed finding ${deletedCode}.`);
+      await fetchFindingsData();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to delete finding.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDeleteAction = async (ms: UnifiedMilestone) => {
+    if (!canDeleteFinding || ms.rawActionStatus === 'Verified') return;
+
+    if (mode === 'demo' || !selectedFinding) {
+      if (selectedFinding) {
+        setDemoFindings((prev) =>
+          prev.map((f) =>
+            f.id === selectedFinding.id
+              ? { ...f, milestones: f.milestones.filter((m) => m.id !== ms.id) }
+              : f
+          )
+        );
+      }
+      setConfirmDeleteActionId(null);
+      onNotify('Deleted corrective action milestone (Demo).');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await apiClient.delete(`/actions/${ms.id}`);
+      setConfirmDeleteActionId(null);
+      onNotify(`Deleted corrective action ${ms.code || ms.title}.`);
+      await fetchFindingsData();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to delete corrective action.');
     } finally {
       setSubmitting(false);
     }
@@ -1495,6 +1641,59 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
                   <span>Audit Trail</span>
                 </button>
               </div>
+
+              {selectedFinding.status === 'Verification Pending' && canRejectVerification && (
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => {
+                    setRejectReason('');
+                    setRejectModalOpen(true);
+                  }}
+                  className="w-full h-9 px-3 rounded-lg bg-error-container/50 border border-error/30 hover:bg-error-container text-error text-label-md font-semibold transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  <span>Reject Verification &amp; Reopen</span>
+                </button>
+              )}
+
+              {canDeleteFinding && selectedFinding.status !== 'Closed' && (
+                <div className="pt-1 border-t border-surface-container flex items-center justify-between gap-2">
+                  {confirmDeleteFinding ? (
+                    <>
+                      <span className="text-label-sm text-error font-semibold">
+                        Delete non-closed {selectedFinding.code}?
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteFinding(false)}
+                          className="h-8 px-3 rounded-lg border border-border-hairline text-label-sm bg-surface-container-lowest"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          disabled={submitting}
+                          onClick={() => void handleDeleteFinding()}
+                          className="h-8 px-3 rounded-lg bg-error text-on-error text-label-sm font-semibold"
+                        >
+                          Confirm Delete
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteFinding(true)}
+                      className="w-full h-9 px-3 rounded-lg border border-error/25 text-error hover:bg-error-container/40 text-label-md transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span>Delete Non-Closed Finding</span>
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           }
         >
@@ -1565,6 +1764,16 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
                   {selectedFinding.rootCauseDetailed}
                 </div>
               </div>
+
+              {selectedFinding.rejectionReason && (
+                <div className="p-4 rounded-xl bg-error-container/40 border border-error/30 space-y-1">
+                  <span className="text-label-sm uppercase tracking-wider font-bold text-error flex items-center gap-1.5">
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Previous Verification Rejected &amp; Reopened</span>
+                  </span>
+                  <p className="text-body-sm text-on-surface">{selectedFinding.rejectionReason}</p>
+                </div>
+              )}
 
               {selectedFinding.managementResponse && (
                 <div className="space-y-1.5">
@@ -1842,21 +2051,54 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
                           </div>
                         </button>
 
-                        {ms.rawActionStatus && (
-                          <StatusBadge
-                            tone={
-                              ms.rawActionStatus === 'Verified'
-                                ? 'success'
-                                : ms.rawActionStatus === 'Rejected'
-                                  ? 'danger'
-                                  : ms.rawActionStatus === 'Submitted'
-                                    ? 'secondary'
-                                    : 'neutral'
-                            }
-                          >
-                            {ms.rawActionStatus}
-                          </StatusBadge>
-                        )}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {ms.rawActionStatus && (
+                            <StatusBadge
+                              tone={
+                                ms.rawActionStatus === 'Verified'
+                                  ? 'success'
+                                  : ms.rawActionStatus === 'Rejected'
+                                    ? 'danger'
+                                    : ms.rawActionStatus === 'Submitted'
+                                      ? 'secondary'
+                                      : 'neutral'
+                              }
+                            >
+                              {ms.rawActionStatus}
+                            </StatusBadge>
+                          )}
+                          {canDeleteFinding && ms.rawActionStatus !== 'Verified' && (
+                            confirmDeleteActionId === ms.id ? (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteActionId(null)}
+                                  className="h-7 px-2 rounded border border-border-hairline text-label-sm"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={submitting}
+                                  onClick={() => void handleDeleteAction(ms)}
+                                  className="h-7 px-2 rounded bg-error text-on-error text-label-sm font-semibold"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteActionId(ms.id)}
+                                title="Delete non-verified corrective action"
+                                aria-label={`Delete action ${ms.code || ms.title}`}
+                                className="p-1.5 rounded-lg text-outline hover:text-error hover:bg-error-container/40 transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )
+                          )}
+                        </div>
                       </div>
 
                       {mode === 'api' &&
@@ -1942,6 +2184,67 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
         </SlideOverDrawer>
       )}
 
+      {/* Reject Verification & Reopen Modal */}
+      {rejectModalOpen && selectedFinding && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="modal-reject-finding"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+        >
+          <div className="fixed inset-0 bg-primary/40 backdrop-blur-[2px]" onClick={() => setRejectModalOpen(false)} />
+          <form
+            onSubmit={handleRejectVerification}
+            className="relative w-full max-w-md bg-surface-container-lowest rounded-xl border border-border-hairline shadow-exec-lg p-6 z-10 space-y-4"
+          >
+            <div className="flex items-center justify-between">
+              <h3 id="modal-reject-finding" className="text-headline-md text-error font-bold flex items-center gap-2">
+                <RotateCcw className="w-4 h-4" />
+                <span>Reject Verification — {selectedFinding.code}</span>
+              </h3>
+              <button type="button" onClick={() => setRejectModalOpen(false)} aria-label="Close reject modal">
+                <X className="w-4 h-4 text-outline" />
+              </button>
+            </div>
+            <p className="text-body-sm text-on-surface-variant">
+              Specify the control deficiency or missing evidence. Returning this finding reopens it to{' '}
+              <strong className="text-on-surface">In Progress</strong> and alerts the remediation owner.
+            </p>
+            <div>
+              <label htmlFor="reject-reason-input" className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                Rejection Reason (min 3 characters)
+              </label>
+              <textarea
+                id="reject-reason-input"
+                rows={4}
+                required
+                minLength={3}
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="e.g. Uploaded key rotation screenshot predates control cutover; attach post-cutover IAM log."
+                className="w-full p-3 rounded-lg border border-border-hairline text-body-md focus:outline-none focus:border-error"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRejectModalOpen(false)}
+                className="h-9 px-4 rounded-lg border border-border-hairline text-label-md"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submitting || rejectReason.trim().length < 3}
+                className="h-9 px-4 rounded-lg bg-error text-on-error disabled:opacity-50 text-label-md font-semibold"
+              >
+                {submitting ? 'Reopening...' : 'Reject & Reopen Finding'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Management Note Modal */}
       {noteModalOpen && selectedFinding && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -2007,7 +2310,14 @@ export const FindingsCorrectiveActionsPage: React.FC<FindingsCorrectiveActionsPa
                     <select
                       required
                       value={newFindingAuditId}
-                      onChange={(e) => setNewFindingAuditId(e.target.value)}
+                      onChange={(e) => {
+                        const chosenId = e.target.value;
+                        setNewFindingAuditId(chosenId);
+                        const chosenAudit = audits.find((a) => a.id === chosenId);
+                        if (chosenAudit) {
+                          setNewFindingDeptId(chosenAudit.department_id);
+                        }
+                      }}
                       className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-sm bg-surface-container-lowest"
                     >
                       {audits.map((a) => (

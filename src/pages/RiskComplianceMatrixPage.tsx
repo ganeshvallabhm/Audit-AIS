@@ -14,6 +14,7 @@ import {
   History,
   LayoutGrid,
   MoreVertical,
+  Send,
   ShieldAlert,
   ShieldPlus,
   SlidersHorizontal,
@@ -27,13 +28,15 @@ import { PageHeader } from '../components/ui/PageHeader';
 import { ProgressBar } from '../components/ui/ProgressBar';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { useAuth } from '../context/AuthContext';
+import { useNotifications } from '../context/NotificationContext';
 import { ApiError, apiClient } from '../services/apiClient';
 import { auditService } from '../services/auditService';
 import {
   ActionStatusLiteral,
   AuditOut,
-  CorrectiveActionOut,
+  DashboardOverviewOut,
   DepartmentOut,
+  FrameworkComplianceOut,
   PaginatedResponse,
   RiskCategoryLiteral,
   RiskDistributionOut,
@@ -103,6 +106,8 @@ interface UnifiedRisk {
   impact: number;
   score: number;
   severity: RiskSeverity;
+  residualProbability: number;
+  residualImpact: number;
   residualScore: number;
   residualLevel: string;
   owner: {
@@ -116,6 +121,7 @@ interface UnifiedRisk {
   affectedAssets: string[];
   escalation: string;
   nextReview: string;
+  rawNextReviewDate: string | null;
   progress: number;
   status: RiskStatusLiteral;
   milestones: {
@@ -132,11 +138,13 @@ interface UnifiedRisk {
 }
 
 export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> = ({ onNotify }) => {
-  const { mode, hasRole } = useAuth();
+  const { mode, hasRole, user } = useAuth();
+  const { refresh: refreshNotifications } = useNotifications();
 
   // API state
   const [apiRisks, setApiRisks] = useState<RiskOut[]>([]);
   const [distribution, setDistribution] = useState<RiskDistributionOut | null>(null);
+  const [frameworkCompliance, setFrameworkCompliance] = useState<FrameworkComplianceOut[]>([]);
   const [departments, setDepartments] = useState<DepartmentOut[]>([]);
   const [audits, setAudits] = useState<AuditOut[]>([]);
   const [loading, setLoading] = useState(mode === 'api');
@@ -162,7 +170,16 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
   const [reassessOpen, setReassessOpen] = useState(false);
   const [reassessProb, setReassessProb] = useState(3);
   const [reassessImpact, setReassessImpact] = useState(4);
+  const [reassessResProb, setReassessResProb] = useState(2);
+  const [reassessResImpact, setReassessResImpact] = useState(2);
   const [reassessStrategy, setReassessStrategy] = useState('');
+  const [reassessEscalation, setReassessEscalation] = useState('');
+  const [reassessNextReview, setReassessNextReview] = useState('');
+
+  // Escalate Risk inline state
+  const [escalateOpen, setEscalateOpen] = useState(false);
+  const [escalateTarget, setEscalateTarget] = useState('Board Audit Committee');
+  const [escalateNote, setEscalateNote] = useState('');
 
   // Create Risk modal state
   const [createOpen, setCreateOpen] = useState(false);
@@ -181,6 +198,7 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
 
   const canCreateOrReassess = hasRole('Admin', 'Auditor');
   const canUpdateTreatmentStatus = hasRole('Admin', 'Auditor', 'Management');
+  const isManagementOnly = mode === 'api' && user?.role === 'Management';
 
   const fetchRisks = useCallback(async () => {
     if (mode !== 'api') {
@@ -190,25 +208,27 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
     setLoading(true);
     setErrorMsg(null);
     try {
-      const [risksRes, distRes, deptRes, audRes] = await Promise.all([
+      const [risksRes, distRes, deptRes, audRes, dashRes] = await Promise.all([
         apiClient.get<PaginatedResponse<RiskOut>>('/risks?limit=200'),
         apiClient.get<RiskDistributionOut>('/dashboard/risk-distribution'),
         apiClient.get<DepartmentOut[]>('/departments'),
         apiClient.get<PaginatedResponse<AuditOut>>('/audits?limit=100'),
+        apiClient.get<DashboardOverviewOut>('/dashboard'),
       ]);
       setApiRisks(risksRes.items);
       setDistribution(distRes);
       setDepartments(deptRes);
       setAudits(audRes.items);
-      if (!createDeptId && deptRes.length > 0) {
-        setCreateDeptId(deptRes[0].id);
+      setFrameworkCompliance(dashRes.framework_compliance ?? []);
+      if (deptRes.length > 0) {
+        setCreateDeptId((prev) => prev || deptRes[0].id);
       }
     } catch (err) {
       setErrorMsg(err instanceof ApiError ? err.detail : 'Failed to load enterprise risk matrix.');
     } finally {
       setLoading(false);
     }
-  }, [mode, createDeptId]);
+  }, [mode]);
 
   useEffect(() => {
     void fetchRisks();
@@ -228,6 +248,8 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
         impact: r.impact,
         score: r.inherent_score,
         severity: classifyRiskBand(r.inherent_score),
+        residualProbability: r.residual_probability ?? r.probability,
+        residualImpact: r.residual_impact ?? r.impact,
         residualScore: r.residual_score,
         residualLevel: r.residual_level,
         owner: {
@@ -241,6 +263,7 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
         affectedAssets: r.affected_assets.length > 0 ? r.affected_assets : [r.department_name],
         escalation: r.escalation_target || 'Audit Committee',
         nextReview: r.next_review_date || 'Q1 FY26',
+        rawNextReviewDate: r.next_review_date || null,
         progress: r.progress_percent,
         status: r.status,
         milestones: r.corrective_actions.map((ca) => ({
@@ -284,6 +307,8 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
         impact: r.impact,
         score,
         severity: classifyRiskBand(score),
+        residualProbability: Math.max(1, r.probability - 1),
+        residualImpact: Math.max(1, r.impact - 1),
         residualScore: r.residualScore,
         residualLevel: classifyRiskBand(r.residualScore),
         owner: r.owner,
@@ -292,6 +317,7 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
         affectedAssets: r.affectedAssets,
         escalation: r.escalation,
         nextReview: r.nextReview,
+        rawNextReviewDate: null,
         progress: r.progress,
         status: r.status as RiskStatusLiteral,
         milestones: r.milestones.map((m) => ({
@@ -392,9 +418,16 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
     setSelectedRiskId(risk.id);
     setModalTab('overview');
     setReassessOpen(false);
+    setEscalateOpen(false);
     setReassessProb(risk.probability);
     setReassessImpact(risk.impact);
+    setReassessResProb(risk.residualProbability);
+    setReassessResImpact(risk.residualImpact);
     setReassessStrategy(risk.mitigationStrategy);
+    setReassessEscalation(risk.escalation);
+    setReassessNextReview(risk.rawNextReviewDate || '');
+    setEscalateTarget(risk.escalation || 'Board Audit Committee');
+    setEscalateNote('');
   };
 
   const handleCreateRiskSubmit = async (e: React.FormEvent) => {
@@ -496,10 +529,12 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
 
   const handleSaveReassessment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedRisk || !canCreateOrReassess) return;
+    if (!selectedRisk || !canUpdateTreatmentStatus) return;
 
     const newScore = reassessProb * reassessImpact;
     const newSev = classifyRiskBand(newScore);
+    const newResScore = reassessResProb * reassessResImpact;
+    const newResLevel = classifyRiskBand(newResScore);
 
     if (mode === 'demo') {
       const toScale = (n: number): 1 | 2 | 3 | 4 | 5 =>
@@ -509,11 +544,15 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
           r.id === selectedRisk.id
             ? {
                 ...r,
-                probability: toScale(reassessProb),
-                impact: toScale(reassessImpact),
-                score: newScore,
-                severity: newSev,
-                mitigationStrategy: reassessStrategy,
+                probability: canCreateOrReassess ? toScale(reassessProb) : r.probability,
+                impact: canCreateOrReassess ? toScale(reassessImpact) : r.impact,
+                score: canCreateOrReassess ? newScore : r.score,
+                severity: canCreateOrReassess ? newSev : r.severity,
+                residualScore: canCreateOrReassess ? newResScore : r.residualScore,
+                residualLevel: canCreateOrReassess ? newResLevel : r.residualLevel,
+                mitigationStrategy: canCreateOrReassess ? reassessStrategy : r.mitigationStrategy,
+                escalation: reassessEscalation.trim() || r.escalation,
+                nextReview: reassessNextReview || r.nextReview,
               }
             : r
         )
@@ -525,16 +564,78 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
 
     setSaving(true);
     try {
-      const updated = await apiClient.put<RiskOut>(`/risks/${selectedRisk.id}`, {
-        probability: reassessProb,
-        impact: reassessImpact,
-        mitigation_strategy: reassessStrategy.trim() || selectedRisk.mitigationStrategy,
-      });
+      const payload = isManagementOnly
+        ? {
+            escalation_target: reassessEscalation.trim() || null,
+            next_review_date: reassessNextReview || null,
+          }
+        : {
+            probability: reassessProb,
+            impact: reassessImpact,
+            residual_probability: reassessResProb,
+            residual_impact: reassessResImpact,
+            mitigation_strategy: reassessStrategy.trim() || selectedRisk.mitigationStrategy,
+            escalation_target: reassessEscalation.trim() || null,
+            next_review_date: reassessNextReview || null,
+          };
+
+      const updated = await apiClient.put<RiskOut>(`/risks/${selectedRisk.id}`, payload);
       setReassessOpen(false);
-      onNotify(`Updated risk ${updated.code} score to ${updated.inherent_score} (${updated.severity}).`);
+      onNotify(`Updated risk ${updated.code} (${updated.inherent_score} ${updated.severity}, residual ${updated.residual_score}).`);
       await fetchRisks();
+      await refreshNotifications();
     } catch (err) {
-      onNotify(err instanceof ApiError ? err.detail : 'Failed to re-assess risk score.');
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to update risk assessment.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleEscalateRisk = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRisk || !canUpdateTreatmentStatus) return;
+
+    const target = escalateTarget.trim() || 'Board Audit Committee';
+    if (mode === 'demo') {
+      setDemoRisks((prev) =>
+        prev.map((r) =>
+          r.id === selectedRisk.id
+            ? {
+                ...r,
+                escalation: target,
+                status: r.status === 'Open' ? 'In Review' : r.status,
+                auditLog: [
+                  {
+                    timestamp: 'Just Now',
+                    title: `Escalated to ${target}`,
+                    detail: escalateNote.trim() || 'Formal governance escalation triggered.',
+                    tone: 'error',
+                  },
+                  ...r.auditLog,
+                ],
+              }
+            : r
+        )
+      );
+      setEscalateOpen(false);
+      setEscalateNote('');
+      onNotify(`Escalated ${selectedRisk.code} to ${target} (Demo).`);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const updated = await apiClient.post<RiskOut>(`/risks/${selectedRisk.id}/escalate`, {
+        escalation_target: target,
+        note: escalateNote.trim() || null,
+      });
+      setEscalateOpen(false);
+      setEscalateNote('');
+      onNotify(`Escalated ${updated.code} to ${updated.escalation_target || target} & notified executives.`);
+      await fetchRisks();
+      await refreshNotifications();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Risk escalation failed.');
     } finally {
       setSaving(false);
     }
@@ -937,77 +1038,150 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
               </Link>
             </div>
 
-            <div className="space-y-3.5">
-              <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60">
-                <div className="flex items-center justify-between mb-2 gap-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-headline-sm text-on-surface font-bold">SOC 2 Type II</span>
-                    <StatusBadge tone="secondary">94% Target</StatusBadge>
-                  </div>
-                  <span className="font-mono text-label-sm text-on-surface-variant">Surveillance</span>
+            {mode === 'api' ? (
+              loading && frameworkCompliance.length === 0 ? (
+                <div className="p-6 text-center text-body-sm text-outline">
+                  Calculating live statutory framework posture from PostgreSQL control tests...
                 </div>
-                <ProgressBar value={94} heightClass="h-2" trackClass="bg-surface-container-high" />
-                <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
-                  <span>Trust Services Criteria CC1–CC9</span>
-                  <span className="text-secondary font-semibold">Assurance Valid</span>
+              ) : frameworkCompliance.length === 0 ? (
+                <div className="p-5 rounded-xl bg-surface-container-low/70 border border-border-hairline text-body-sm text-on-surface-variant">
+                  No statutory control evaluations recorded in PostgreSQL yet. Evaluate checklist controls to compute live framework scores.
                 </div>
-              </div>
+              ) : (
+                <div className="space-y-3.5">
+                  {frameworkCompliance.map((fw) => {
+                    const roundedScore = Math.round(fw.score);
+                    const tone =
+                      fw.status === 'Compliant'
+                        ? 'secondary'
+                        : fw.status === 'Monitor'
+                          ? 'info'
+                          : fw.status === 'Needs Attention'
+                            ? 'danger'
+                            : 'neutral';
+                    const fillClass =
+                      fw.status === 'Needs Attention'
+                        ? 'bg-error'
+                        : fw.status === 'Compliant'
+                          ? 'bg-secondary'
+                          : fw.status === 'Monitor'
+                            ? 'bg-primary'
+                            : 'bg-outline';
 
-              <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60">
-                <div className="flex items-center justify-between mb-2 gap-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-headline-sm text-on-surface font-bold">ISO/IEC 27001</span>
-                    <StatusBadge tone="neutral">88% Stage 2</StatusBadge>
+                    return (
+                      <div
+                        key={fw.framework}
+                        className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60"
+                      >
+                        <div className="flex items-center justify-between mb-2 gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-headline-sm text-on-surface font-bold">{fw.framework}</span>
+                            <StatusBadge tone={tone}>
+                              {fw.controls_evaluated > 0 ? `${roundedScore}% • ${fw.status}` : 'Not Evaluated'}
+                            </StatusBadge>
+                          </div>
+                          <span className="font-mono text-label-sm text-on-surface-variant">
+                            {fw.controls_evaluated}/{fw.controls_total} controls
+                          </span>
+                        </div>
+                        <ProgressBar
+                          value={roundedScore}
+                          heightClass="h-2"
+                          trackClass="bg-surface-container-high"
+                          fillClass={fillClass}
+                        />
+                        <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
+                          <span>Weighted Checklist Control Score</span>
+                          <span
+                            className={`font-semibold ${
+                              fw.status === 'Needs Attention'
+                                ? 'text-error'
+                                : fw.status === 'Compliant'
+                                  ? 'text-secondary'
+                                  : 'text-on-surface'
+                            }`}
+                          >
+                            {fw.status}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            ) : (
+              <div className="space-y-3.5">
+                <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60">
+                  <div className="flex items-center justify-between mb-2 gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-headline-sm text-on-surface font-bold">SOC 2 Type II</span>
+                      <StatusBadge tone="secondary">94% Target</StatusBadge>
+                    </div>
+                    <span className="font-mono text-label-sm text-on-surface-variant">Surveillance</span>
                   </div>
-                  <span className="font-mono text-label-sm text-on-surface-variant">Annex A</span>
+                  <ProgressBar value={94} heightClass="h-2" trackClass="bg-surface-container-high" />
+                  <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
+                    <span>Trust Services Criteria CC1–CC9</span>
+                    <span className="text-secondary font-semibold">Assurance Valid</span>
+                  </div>
                 </div>
-                <ProgressBar
-                  value={88}
-                  heightClass="h-2"
-                  trackClass="bg-surface-container-high"
-                  fillClass="bg-primary"
-                />
-                <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
-                  <span>ISMS Information Security Controls</span>
-                  <span className="text-on-surface font-semibold">Fieldwork</span>
-                </div>
-              </div>
 
-              <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60">
-                <div className="flex items-center justify-between mb-2 gap-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-headline-sm text-on-surface font-bold">GDPR &amp; Privacy</span>
-                    <StatusBadge tone="secondary">92% Compliant</StatusBadge>
+                <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60">
+                  <div className="flex items-center justify-between mb-2 gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-headline-sm text-on-surface font-bold">ISO/IEC 27001</span>
+                      <StatusBadge tone="neutral">88% Stage 2</StatusBadge>
+                    </div>
+                    <span className="font-mono text-label-sm text-on-surface-variant">Annex A</span>
                   </div>
-                  <span className="font-mono text-label-sm text-on-surface-variant">Art. 30 / SCC</span>
+                  <ProgressBar
+                    value={88}
+                    heightClass="h-2"
+                    trackClass="bg-surface-container-high"
+                    fillClass="bg-primary"
+                  />
+                  <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
+                    <span>ISMS Information Security Controls</span>
+                    <span className="text-on-surface font-semibold">Fieldwork</span>
+                  </div>
                 </div>
-                <ProgressBar value={92} heightClass="h-2" trackClass="bg-surface-container-high" />
-                <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
-                  <span>DPIA &amp; Cross-Border Controls</span>
-                  <span className="text-secondary font-semibold">Active Monitor</span>
-                </div>
-              </div>
 
-              <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60">
-                <div className="flex items-center justify-between mb-2 gap-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-headline-sm text-on-surface font-bold">NIST CSF 2.0</span>
-                    <StatusBadge tone="neutral">81% Tier 3</StatusBadge>
+                <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60">
+                  <div className="flex items-center justify-between mb-2 gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-headline-sm text-on-surface font-bold">GDPR &amp; Privacy</span>
+                      <StatusBadge tone="secondary">92% Compliant</StatusBadge>
+                    </div>
+                    <span className="font-mono text-label-sm text-on-surface-variant">Art. 30 / SCC</span>
                   </div>
-                  <span className="font-mono text-label-sm text-on-surface-variant">Govern / Protect</span>
+                  <ProgressBar value={92} heightClass="h-2" trackClass="bg-surface-container-high" />
+                  <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
+                    <span>DPIA &amp; Cross-Border Controls</span>
+                    <span className="text-secondary font-semibold">Active Monitor</span>
+                  </div>
                 </div>
-                <ProgressBar
-                  value={81}
-                  heightClass="h-2"
-                  trackClass="bg-surface-container-high"
-                  fillClass="bg-outline"
-                />
-                <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
-                  <span>Identity &amp; Incident Governance</span>
-                  <span className="text-on-surface font-semibold">Remediating</span>
+
+                <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60">
+                  <div className="flex items-center justify-between mb-2 gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-headline-sm text-on-surface font-bold">NIST CSF 2.0</span>
+                      <StatusBadge tone="neutral">81% Tier 3</StatusBadge>
+                    </div>
+                    <span className="font-mono text-label-sm text-on-surface-variant">Govern / Protect</span>
+                  </div>
+                  <ProgressBar
+                    value={81}
+                    heightClass="h-2"
+                    trackClass="bg-surface-container-high"
+                    fillClass="bg-outline"
+                  />
+                  <div className="flex justify-between text-label-sm text-on-surface-variant mt-2">
+                    <span>Identity &amp; Incident Governance</span>
+                    <span className="text-on-surface font-semibold">Remediating</span>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
 
           <div className="pt-4 mt-4 border-t border-surface-container">
@@ -1606,48 +1780,104 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
                       onSubmit={handleSaveReassessment}
                       className="p-4 rounded-xl bg-surface-container-low border border-secondary/40 space-y-3"
                     >
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
                         <span className="text-label-lg font-bold text-primary flex items-center gap-1.5">
                           <SlidersHorizontal className="w-4 h-4 text-secondary" />
-                          <span>Live Score Re-Assessment (Server Severity Recalculated)</span>
+                          <span>
+                            {canCreateOrReassess
+                              ? 'Live Score Re-Assessment & Residual Calibration'
+                              : 'Update Escalation Target & Review Schedule'}
+                          </span>
                         </span>
-                        <StatusBadge tone="secondary">
-                          New Score: {reassessProb * reassessImpact} ({classifyRiskBand(reassessProb * reassessImpact)})
-                        </StatusBadge>
+                        {canCreateOrReassess && (
+                          <StatusBadge tone="secondary">
+                            Inherent {reassessProb * reassessImpact} ({classifyRiskBand(reassessProb * reassessImpact)}) • Residual {reassessResProb * reassessResImpact}
+                          </StatusBadge>
+                        )}
                       </div>
-                      <div className="grid grid-cols-2 gap-3">
+
+                      {canCreateOrReassess && (
+                        <>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            <div>
+                              <label className="block text-label-sm text-outline mb-1">Inherent Prob (1–5)</label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={5}
+                                value={reassessProb}
+                                onChange={(e) => setReassessProb(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
+                                className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-label-sm text-outline mb-1">Inherent Impact (1–5)</label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={5}
+                                value={reassessImpact}
+                                onChange={(e) => setReassessImpact(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
+                                className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-label-sm text-outline mb-1">Residual Prob (1–5)</label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={5}
+                                value={reassessResProb}
+                                onChange={(e) => setReassessResProb(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
+                                className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-label-sm text-outline mb-1">Residual Impact (1–5)</label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={5}
+                                value={reassessResImpact}
+                                onChange={(e) => setReassessResImpact(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
+                                className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest font-mono"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-label-sm text-outline mb-1">Updated Mitigation Strategy</label>
+                            <input
+                              type="text"
+                              value={reassessStrategy}
+                              onChange={(e) => setReassessStrategy(e.target.value)}
+                              className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest text-body-sm"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
-                          <label className="block text-label-sm text-outline mb-1">Probability (1–5)</label>
+                          <label className="block text-label-sm text-outline mb-1">Escalation Target</label>
                           <input
-                            type="number"
-                            min={1}
-                            max={5}
-                            value={reassessProb}
-                            onChange={(e) => setReassessProb(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
-                            className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest font-mono"
+                            type="text"
+                            value={reassessEscalation}
+                            onChange={(e) => setReassessEscalation(e.target.value)}
+                            placeholder="e.g. Board Audit Committee"
+                            className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest text-body-sm"
                           />
                         </div>
                         <div>
-                          <label className="block text-label-sm text-outline mb-1">Impact (1–5)</label>
+                          <label className="block text-label-sm text-outline mb-1">Next Governance Review Date</label>
                           <input
-                            type="number"
-                            min={1}
-                            max={5}
-                            value={reassessImpact}
-                            onChange={(e) => setReassessImpact(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
-                            className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest font-mono"
+                            type="date"
+                            value={reassessNextReview}
+                            onChange={(e) => setReassessNextReview(e.target.value)}
+                            className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest font-mono text-body-sm"
                           />
                         </div>
                       </div>
-                      <div>
-                        <label className="block text-label-sm text-outline mb-1">Updated Mitigation Strategy</label>
-                        <input
-                          type="text"
-                          value={reassessStrategy}
-                          onChange={(e) => setReassessStrategy(e.target.value)}
-                          className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest text-body-sm"
-                        />
-                      </div>
+
                       <div className="flex justify-end gap-2">
                         <button
                           type="button"
@@ -1661,7 +1891,60 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
                           disabled={saving}
                           className="h-8 px-4 rounded-lg bg-secondary text-on-secondary text-label-sm"
                         >
-                          {saving ? 'Updating...' : 'Apply Re-assessment'}
+                          {saving ? 'Updating...' : canCreateOrReassess ? 'Apply Re-assessment' : 'Save Governance Schedule'}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {escalateOpen && (
+                    <form
+                      onSubmit={handleEscalateRisk}
+                      className="p-4 rounded-xl bg-error-container/25 border border-error/30 space-y-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-label-lg font-bold text-error flex items-center gap-1.5">
+                          <Send className="w-4 h-4" />
+                          <span>Escalate Risk &amp; Trigger Executive Alert</span>
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-label-sm text-outline mb-1">Escalation Target</label>
+                          <input
+                            type="text"
+                            required
+                            value={escalateTarget}
+                            onChange={(e) => setEscalateTarget(e.target.value)}
+                            placeholder="Board Audit Committee / CISO"
+                            className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest text-body-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-label-sm text-outline mb-1">Escalation Rationale (Optional)</label>
+                          <input
+                            type="text"
+                            value={escalateNote}
+                            onChange={(e) => setEscalateNote(e.target.value)}
+                            placeholder="Reason for committee visibility..."
+                            className="w-full h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest text-body-sm"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setEscalateOpen(false)}
+                          className="h-8 px-3 rounded-lg border border-border-hairline text-label-sm bg-surface-container-lowest"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={saving}
+                          className="h-8 px-4 rounded-lg bg-error text-on-error text-label-sm font-semibold"
+                        >
+                          {saving ? 'Escalating...' : 'Confirm Escalation'}
                         </button>
                       </div>
                     </form>
@@ -1858,15 +2141,40 @@ export const RiskComplianceMatrixPage: React.FC<RiskComplianceMatrixPageProps> =
                 </button>
                 <button
                   type="button"
-                  disabled={!canCreateOrReassess}
+                  disabled={!canUpdateTreatmentStatus}
                   onClick={() => {
                     setModalTab('overview');
+                    setEscalateOpen(false);
                     setReassessOpen((prev) => !prev);
                   }}
-                  title={canCreateOrReassess ? 'Re-assess Probability & Impact' : 'Admin or Auditor role required'}
+                  title={
+                    canCreateOrReassess
+                      ? 'Re-assess Inherent & Residual Risk Scores'
+                      : canUpdateTreatmentStatus
+                        ? 'Update Review Date & Escalation Target'
+                        : 'Admin, Auditor, or Management role required'
+                  }
                   className="h-9 px-4 bg-surface-container-highest text-secondary text-label-md rounded-lg hover:bg-surface-container-high disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-semibold"
                 >
-                  Re-assess Score
+                  {canCreateOrReassess ? 'Re-assess Score' : 'Update Review'}
+                </button>
+                <button
+                  type="button"
+                  disabled={!canUpdateTreatmentStatus || saving}
+                  onClick={() => {
+                    setModalTab('overview');
+                    setReassessOpen(false);
+                    setEscalateOpen((prev) => !prev);
+                  }}
+                  title={
+                    canUpdateTreatmentStatus
+                      ? 'Escalate risk to Audit Committee or Executive sponsor'
+                      : 'Admin, Auditor, or Management role required'
+                  }
+                  className="h-9 px-3.5 bg-error-container/60 text-error border border-error/25 text-label-md rounded-lg hover:bg-error-container disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-semibold inline-flex items-center gap-1.5"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Escalate</span>
                 </button>
                 <button
                   type="button"

@@ -5,20 +5,29 @@ import {
   ArrowUpRight,
   CheckCheck,
   Info,
+  RefreshCw,
   ShieldAlert,
 } from 'lucide-react';
 import { EmptyState } from '../components/ui/EmptyState';
 import { PageHeader } from '../components/ui/PageHeader';
 import { StatusBadge } from '../components/ui/StatusBadge';
+import { useAuth } from '../context/AuthContext';
 import { useNotifications } from '../context/NotificationContext';
+import { ApiError, apiClient } from '../services/apiClient';
+import { SlaSweepResultOut } from '../types/api';
 
 interface NotificationsPageProps {
   onNotify: (msg: string) => void;
 }
 
 export const NotificationsPage: React.FC<NotificationsPageProps> = ({ onNotify }) => {
-  const { notifications, unreadCount, loading, markRead, markAllRead } = useNotifications();
+  const { mode, hasRole } = useAuth();
+  const { notifications, unreadCount, loading, markRead, markAllRead, refresh } = useNotifications();
   const [filter, setFilter] = useState<'all' | 'unread' | 'critical' | 'warning' | 'info'>('all');
+  const [sweeping, setSweeping] = useState(false);
+  const [lastSweep, setLastSweep] = useState<SlaSweepResultOut | null>(null);
+
+  const canRunSlaSweep = mode === 'api' && hasRole('Admin', 'Auditor');
 
   const filtered = notifications.filter((item) => {
     if (filter === 'unread') return item.unread;
@@ -31,6 +40,23 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({ onNotify }
   const handleMarkAllRead = async () => {
     await markAllRead();
     onNotify('All governance notifications marked as read.');
+  };
+
+  const handleRunSlaSweep = async () => {
+    if (!canRunSlaSweep) return;
+    setSweeping(true);
+    try {
+      const res = await apiClient.post<SlaSweepResultOut>('/notifications/run-sla-sweep');
+      setLastSweep(res);
+      await refresh();
+      onNotify(
+        `SLA sweep complete: ${res.notifications_created} new alerts (${res.overdue_audits} overdue audits, ${res.overdue_actions} overdue actions).`
+      );
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'SLA sweep execution failed.');
+    } finally {
+      setSweeping(false);
+    }
   };
 
   return (
@@ -48,17 +74,44 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({ onNotify }
         title="Notifications & SLA Escalations"
         description="Real-time audit sign-off requests, SLA breach warnings, and automated control monitoring alerts."
         actions={
-          <button
-            type="button"
-            disabled={unreadCount === 0}
-            onClick={() => void handleMarkAllRead()}
-            className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-secondary text-on-secondary text-label-lg hover:bg-secondary-container disabled:opacity-50 transition-colors shadow-exec-sm"
-          >
-            <CheckCheck className="w-4 h-4" />
-            <span>Mark All Read</span>
-          </button>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            {canRunSlaSweep && (
+              <button
+                type="button"
+                disabled={sweeping}
+                onClick={() => void handleRunSlaSweep()}
+                className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-surface-container-lowest border border-border-hairline text-on-surface text-label-lg hover:bg-surface-container-low disabled:opacity-50 transition-colors shadow-exec-sm"
+              >
+                <RefreshCw className={`w-4 h-4 text-secondary ${sweeping ? 'animate-spin' : ''}`} />
+                <span>{sweeping ? 'Scanning SLAs...' : 'Run SLA Sweep'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={unreadCount === 0}
+              onClick={() => void handleMarkAllRead()}
+              className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-secondary text-on-secondary text-label-lg hover:bg-secondary-container disabled:opacity-50 transition-colors shadow-exec-sm"
+            >
+              <CheckCheck className="w-4 h-4" />
+              <span>Mark All Read</span>
+            </button>
+          </div>
         }
       />
+
+      {lastSweep && (
+        <div className="p-4 rounded-xl bg-surface-container-low border border-border-hairline flex flex-wrap items-center justify-between gap-3 text-body-sm text-on-surface-variant">
+          <span>
+            <strong className="text-primary">Latest SLA Scan Telemetry:</strong>{' '}
+            {lastSweep.notifications_created} alert(s) generated across {lastSweep.overdue_audits} overdue audits,{' '}
+            {lastSweep.overdue_actions} overdue actions, {lastSweep.upcoming_deadlines} approaching deadlines, and{' '}
+            {lastSweep.critical_risks} critical risks.
+          </span>
+          <span className="font-mono text-label-sm text-outline">
+            {new Date(lastSweep.ran_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </span>
+        </div>
+      )}
 
       {/* Filter Pills */}
       <div className="flex flex-wrap items-center gap-2">

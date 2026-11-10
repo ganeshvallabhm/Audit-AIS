@@ -3,6 +3,7 @@ import {
   AlertCircle,
   BellRing,
   Database,
+  KeyRound,
   Lock,
   Plus,
   RotateCcw,
@@ -51,6 +52,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onNotify }) => {
   const [newPassword, setNewPassword] = useState('');
   const [provisioning, setProvisioning] = useState(false);
 
+  const [resetTarget, setResetTarget] = useState<UserSummary | null>(null);
+  const [resetPasswordVal, setResetPasswordVal] = useState('');
+  const [resetPasswordConfirm, setResetPasswordConfirm] = useState('');
+  const [resettingPassword, setResettingPassword] = useState(false);
+
   const loadSettingsData = useCallback(async () => {
     if (mode !== 'api') {
       setLoading(false);
@@ -68,6 +74,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onNotify }) => {
       setCompositeFloor(company.minimum_composite_floor.toFixed(1));
       setRiskThreshold(String(company.board_risk_threshold));
       setSlaAutoEscalate(company.sla_auto_escalate);
+      setShaLockEnabled(company.sha_lock_enabled ?? true);
       setAiCitationStrict(company.ai_citation_strict);
       setDigestFrequency(company.digest_frequency);
       setUsers(roster);
@@ -104,6 +111,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onNotify }) => {
         digest_frequency: digestFrequency,
         sla_auto_escalate: slaAutoEscalate,
         ai_citation_strict: aiCitationStrict,
+        sha_lock_enabled: shaLockEnabled,
       });
       onNotify('Enterprise audit governance thresholds & SLA policies saved to PostgreSQL.');
     } catch (err) {
@@ -114,9 +122,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onNotify }) => {
   };
 
   const handleReset = () => {
-    setTargetScore(COMPANY_PROFILE.enterpriseTargetScore.toFixed(1));
-    setCompositeFloor(COMPANY_PROFILE.minimumCompositeFloor.toFixed(1));
-    setRiskThreshold(String(COMPANY_PROFILE.boardRiskThreshold));
+    setTargetScore('85.0');
+    setCompositeFloor('80.0');
+    setRiskThreshold('5');
     setSlaAutoEscalate(true);
     setShaLockEnabled(true);
     setAiCitationStrict(true);
@@ -172,6 +180,34 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onNotify }) => {
       onNotify(err instanceof ApiError ? err.detail : 'Failed to provision user.');
     } finally {
       setProvisioning(false);
+    }
+  };
+
+  const handleAdminResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin || !resetTarget || mode !== 'api') return;
+    if (resetPasswordVal.length < 10) {
+      onNotify('Password must be at least 10 characters.');
+      return;
+    }
+    if (resetPasswordVal !== resetPasswordConfirm) {
+      onNotify('Password confirmation does not match.');
+      return;
+    }
+    setResettingPassword(true);
+    try {
+      const res = await apiClient.post<{ detail: string }>(
+        `/auth/users/${resetTarget.id}/reset-password`,
+        { new_password: resetPasswordVal }
+      );
+      setResetTarget(null);
+      setResetPasswordVal('');
+      setResetPasswordConfirm('');
+      onNotify(res.detail);
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to reset user password.');
+    } finally {
+      setResettingPassword(false);
     }
   };
 
@@ -453,13 +489,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onNotify }) => {
                       </td>
                       {isAdmin && (
                         <td className="py-3.5 px-6 text-right">
-                          <button
-                            type="button"
-                            onClick={() => void handleToggleActive(u)}
-                            className="h-8 px-3 rounded-lg border border-border-hairline text-label-md font-semibold text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-colors"
-                          >
-                            {u.is_active ? 'Deactivate' : 'Activate'}
-                          </button>
+                          <div className="inline-flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setResetTarget(u);
+                                setResetPasswordVal('');
+                                setResetPasswordConfirm('');
+                              }}
+                              className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg border border-border-hairline text-label-md font-semibold text-secondary hover:bg-secondary-fixed transition-colors"
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                              <span>Reset Password</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleToggleActive(u)}
+                              className="h-8 px-3 rounded-lg border border-border-hairline text-label-md font-semibold text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-colors"
+                            >
+                              {u.is_active ? 'Deactivate' : 'Activate'}
+                            </button>
+                          </div>
                         </td>
                       )}
                     </tr>
@@ -587,6 +637,75 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onNotify }) => {
               >
                 <Plus className="w-4 h-4" />
                 <span>{provisioning ? 'Creating...' : 'Create User'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {/* Admin Reset User Password Modal */}
+      {resetTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-primary/40 backdrop-blur-[2px]" onClick={() => setResetTarget(null)} />
+          <form
+            onSubmit={handleAdminResetPassword}
+            className="relative w-full max-w-md bg-surface-container-lowest rounded-xl border border-border-hairline shadow-exec-lg overflow-hidden z-10"
+          >
+            <div className="px-6 py-4 bg-surface-container-low border-b border-border-hairline flex items-center justify-between">
+              <h2 className="text-headline-lg text-primary">Reset User Password</h2>
+              <button
+                type="button"
+                onClick={() => setResetTarget(null)}
+                className="p-1.5 text-outline hover:text-on-surface rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <p className="text-body-sm text-on-surface-variant">
+                Set a new Argon2id password for <strong className="text-primary">{resetTarget.full_name}</strong>{' '}
+                (<span className="font-mono">{resetTarget.email}</span>). All existing active refresh sessions will be revoked immediately.
+              </p>
+              <div>
+                <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                  New Password (min 10 chars)
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={10}
+                  value={resetPasswordVal}
+                  onChange={(e) => setResetPasswordVal(e.target.value)}
+                  className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-md focus:outline-none focus:border-secondary"
+                />
+              </div>
+              <div>
+                <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                  Confirm New Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={10}
+                  value={resetPasswordConfirm}
+                  onChange={(e) => setResetPasswordConfirm(e.target.value)}
+                  className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-md focus:outline-none focus:border-secondary"
+                />
+              </div>
+            </div>
+            <div className="px-6 py-4 bg-surface-container-low border-t border-border-hairline flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setResetTarget(null)}
+                className="h-10 px-4 rounded-lg border border-border-hairline bg-surface-container-lowest text-label-lg text-on-surface-variant"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={resettingPassword}
+                className="h-10 px-4 rounded-lg bg-secondary text-on-secondary text-label-lg hover:bg-secondary-container disabled:opacity-60"
+              >
+                {resettingPassword ? 'Updating...' : 'Reset Password & Revoke Sessions'}
               </button>
             </div>
           </form>

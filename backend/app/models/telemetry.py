@@ -34,6 +34,14 @@ class Notification(TimestampMixin, Base):
             "is_read",
             text("created_at DESC"),
         ),
+        Index(
+            "uq_notifications_dedup_key",
+            "company_id",
+            "user_id",
+            "dedup_key",
+            unique=True,
+            postgresql_where=text("dedup_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -53,6 +61,7 @@ class Notification(TimestampMixin, Base):
     entity_type: Mapped[str | None] = mapped_column(String(48), nullable=True)
     entity_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     target_link: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    dedup_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
 
 
 class AuditHistory(Base):
@@ -65,6 +74,10 @@ class AuditHistory(Base):
             name="ck_audit_history_category",
         ),
         CheckConstraint("event_sha256 ~ '^[0-9a-f]{64}$'", name="ck_audit_history_sha256"),
+        CheckConstraint(
+            "prev_event_sha256 IS NULL OR prev_event_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_audit_history_prev_sha256",
+        ),
         Index("ix_audit_history_company_time", "company_id", text("created_at DESC")),
         Index("ix_audit_history_entity", "company_id", "entity_type", "entity_id"),
     )
@@ -90,6 +103,7 @@ class AuditHistory(Base):
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    prev_event_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     event_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

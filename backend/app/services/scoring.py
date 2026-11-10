@@ -1,5 +1,6 @@
 from datetime import date, datetime, UTC
 from decimal import Decimal
+import re
 from typing import Literal
 from uuid import UUID
 
@@ -197,4 +198,33 @@ def compute_department_score(db: Session, department: Department) -> float | Non
     if not scores:
         return None
     return round(sum(float(s) for s in scores) / len(scores), 2)
+
+
+def generate_next_code(
+    db: Session,
+    model: type,
+    company_id: UUID,
+    prefix: str,
+    start_num: int,
+    pad: int = 0,
+) -> str:
+    """Generates a collision-safe sequential code even after record deletions."""
+    existing_codes = set(
+        db.scalars(select(model.code).where(model.company_id == company_id)).all()
+    )
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    max_num = start_num - 1
+    for existing_code in existing_codes:
+        match = pattern.match(existing_code or "")
+        if match:
+            max_num = max(max_num, int(match.group(1)))
+
+    next_num = max_num + 1
+    while True:
+        suffix = f"{next_num:0{pad}d}" if pad > 0 else str(next_num)
+        candidate = f"{prefix}{suffix}"
+        if candidate not in existing_codes:
+            return candidate
+        next_num += 1
+
 

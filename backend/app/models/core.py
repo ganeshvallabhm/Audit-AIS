@@ -65,6 +65,9 @@ class Company(TimestampMixin, Base):
     )
     sla_auto_escalate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     ai_citation_strict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sha_lock_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     departments: Mapped[list["Department"]] = relationship(
@@ -142,4 +145,34 @@ class Department(TimestampMixin, Base):
     members: Mapped[list["User"]] = relationship(
         foreign_keys=[User.department_id], back_populates="department"
     )
+
+
+class RefreshSession(TimestampMixin, Base):
+    __tablename__ = "refresh_sessions"
+    __table_args__ = (
+        Index("ix_refresh_sessions_user", "company_id", "user_id"),
+        Index("ix_refresh_sessions_family", "company_id", "token_family"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4, server_default=text("gen_random_uuid()")
+    )
+    company_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_family: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    replaced_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("refresh_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    user: Mapped["User"] = relationship()
+
 

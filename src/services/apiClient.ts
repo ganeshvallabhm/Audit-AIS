@@ -26,6 +26,20 @@ export function getAccessToken(): string | null {
   return inMemoryAccessToken;
 }
 
+export function readCookie(name: string): string | null {
+  if (typeof document === 'undefined' || !document.cookie) {
+    return null;
+  }
+  const prefix = `${encodeURIComponent(name)}=`;
+  for (const part of document.cookie.split(';')) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) {
+      return decodeURIComponent(trimmed.slice(prefix.length));
+    }
+  }
+  return null;
+}
+
 export function setSessionExpiredHandler(handler: (() => void) | null): void {
   sessionExpiredHandler = handler;
 }
@@ -74,10 +88,15 @@ export async function refreshAccessToken(): Promise<TokenResponse | null> {
 
   refreshInFlight = (async () => {
     try {
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      const csrf = readCookie('companyaudit_csrf');
+      if (csrf) {
+        headers['X-CSRF-Token'] = csrf;
+      }
       const res = await fetch(`${API_BASE}/auth/refresh`, {
         method: 'POST',
         credentials: 'include',
-        headers: { Accept: 'application/json' },
+        headers,
       });
       if (!res.ok) {
         inMemoryAccessToken = null;
@@ -121,6 +140,14 @@ async function performFetch(path: string, options: RequestOptions = {}): Promise
 
   if (!skipAuth && inMemoryAccessToken) {
     headers.set('Authorization', `Bearer ${inMemoryAccessToken}`);
+  }
+
+  const method = (rest.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS' && !headers.has('X-CSRF-Token')) {
+    const csrf = readCookie('companyaudit_csrf');
+    if (csrf) {
+      headers.set('X-CSRF-Token', csrf);
+    }
   }
 
   const res = await fetch(`${API_BASE}${path}`, {
@@ -177,6 +204,13 @@ export const apiClient = {
   patch: async <T>(path: string, body?: unknown, options?: Omit<RequestOptions, 'method' | 'body'>): Promise<T> => {
     const res = await performFetch(path, { ...options, method: 'PATCH', body });
     if (!res.ok) throw await parseErrorResponse(res);
+    return (await res.json()) as T;
+  },
+
+  delete: async <T>(path: string, options?: Omit<RequestOptions, 'method'>): Promise<T> => {
+    const res = await performFetch(path, { ...options, method: 'DELETE' });
+    if (!res.ok) throw await parseErrorResponse(res);
+    if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   },
 

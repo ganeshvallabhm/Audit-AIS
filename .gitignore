@@ -21,7 +21,10 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Local encrypted/vaulted evidence blobs
+# Local encrypted/vaulted evidence blobs & DB backups
 backend/storage/
 !backend/storage/.gitkeep
+backend/backups/
+*.dump
+*.dump.sha256
 

@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
   apiClient,
+  readCookie,
   refreshAccessToken,
   setAccessToken,
   setSessionExpiredHandler,
@@ -118,6 +119,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (active) {
           setUser(DEMO_USERS_BY_ROLE[validRole]);
           setMode('demo');
+        }
+        return;
+      }
+
+      if (!readCookie('companyaudit_csrf')) {
+        if (active) {
+          setUser(null);
+          setMode('anonymous');
         }
         return;
       }

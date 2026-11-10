@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     demo_account_password: str | None = None
     cookie_secure: bool = False
 
+    # Optional server-side external AI integration (never exposed to browser)
+    ai_provider: Literal["openai", "anthropic", "gemini"] | None = None
+    ai_api_key: str | None = None
+    ai_model: str | None = None
+
+    # Optional telemetry & operational automation
+    sentry_dsn: str | None = None
+    enable_background_scheduler: bool = True
+    scheduler_interval_seconds: int = 900
+    rate_limit_enabled: bool = True
+
     @field_validator("jwt_secret_key")
     @classmethod
     def validate_jwt_secret(cls, value: str, info) -> str:
@@ -44,6 +55,18 @@ class Settings(BaseSettings):
             if env in {"production", "staging"}:
                 raise ValueError("JWT_SECRET_KEY must be replaced with a 32+ char secret outside dev.")
         return value
+
+    @model_validator(mode="after")
+    def validate_production_posture(self) -> "Settings":
+        if self.environment in {"production", "staging"}:
+            if self.allow_demo_seed:
+                raise ValueError("ALLOW_DEMO_SEED must be false in staging/production environments.")
+            if not self.cookie_secure:
+                raise ValueError("COOKIE_SECURE must be true in staging/production environments.")
+            origins = self.cors_origin_list
+            if not origins or "*" in origins:
+                raise ValueError("CORS_ORIGINS cannot contain wildcard '*' in staging/production.")
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -58,4 +81,3 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-

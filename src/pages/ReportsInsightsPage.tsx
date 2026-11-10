@@ -22,13 +22,15 @@ import {
   Lock,
   MailCheck,
   Maximize2,
-  MoreVertical,
   Network,
+  Pause,
+  Play,
   Plus,
   PlusCircle,
   Printer,
   Send,
   Shield,
+  Trash2,
   TrendingUp,
   X,
   Zap,
@@ -40,7 +42,13 @@ import { StatusBadge } from '../components/ui/StatusBadge';
 import { useAuth } from '../context/AuthContext';
 import { ApiError, apiClient } from '../services/apiClient';
 import { auditService } from '../services/auditService';
-import { DashboardOverviewOut, ReportDetailOut, ReportSuiteOut } from '../types/api';
+import {
+  DashboardOverviewOut,
+  DistributionRuleCreate,
+  DistributionRuleOut,
+  ReportDetailOut,
+  ReportSuiteOut,
+} from '../types/api';
 import { DistributionRule, ReportSuite } from '../types/audit';
 
 interface ReportsInsightsPageProps {
@@ -67,11 +75,14 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
 
   // API state
   const [apiSuites, setApiSuites] = useState<ReportSuiteOut[]>([]);
+  const [apiDistributions, setApiDistributions] = useState<DistributionRuleOut[]>([]);
   const [dashboard, setDashboard] = useState<DashboardOverviewOut | null>(null);
   const [boardDetail, setBoardDetail] = useState<ReportDetailOut | null>(null);
   const [activeReportDetail, setActiveReportDetail] = useState<ReportDetailOut | null>(null);
   const [loading, setLoading] = useState(mode === 'api');
   const [loadingReportId, setLoadingReportId] = useState<string | null>(null);
+  const [exportingKey, setExportingKey] = useState<string | null>(null);
+  const [savingRule, setSavingRule] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Demo state
@@ -83,7 +94,10 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [newRuleOpen, setNewRuleOpen] = useState(false);
   const [ruleTitle, setRuleTitle] = useState('');
-  const [ruleSchedule, setRuleSchedule] = useState('Every Friday at 09:00 EST • Board Audit Committee');
+  const [ruleSchedule, setRuleSchedule] = useState('Every Friday at 09:00 EST');
+  const [ruleRecipients, setRuleRecipients] = useState('Audit Committee, Chief Audit Officer');
+  const [ruleSuiteId, setRuleSuiteId] = useState('rep-board');
+  const [ruleFormat, setRuleFormat] = useState<'pdf' | 'xlsx' | 'csv'>('pdf');
 
   const canManageDistributions = hasRole('Admin', 'Auditor', 'Management');
 
@@ -95,14 +109,17 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
     setLoading(true);
     setErrorMsg(null);
     try {
-      const [suitesRes, dashRes, boardRes] = await Promise.all([
+      const qsPeriod = encodeURIComponent(fiscalPeriod);
+      const [suitesRes, dashRes, boardRes, distRes] = await Promise.all([
         apiClient.get<ReportSuiteOut[]>('/reports'),
-        apiClient.get<DashboardOverviewOut>(`/dashboard?period=${encodeURIComponent(fiscalPeriod)}`),
-        apiClient.get<ReportDetailOut>('/reports/rep-board'),
+        apiClient.get<DashboardOverviewOut>(`/dashboard?period=${qsPeriod}`),
+        apiClient.get<ReportDetailOut>(`/reports/rep-board?period=${qsPeriod}`),
+        apiClient.get<DistributionRuleOut[]>('/reports/distributions'),
       ]);
       setApiSuites(suitesRes);
       setDashboard(dashRes);
       setBoardDetail(boardRes);
+      setApiDistributions(distRes);
     } catch (err) {
       setErrorMsg(err instanceof ApiError ? err.detail : 'Failed to load governance reports.');
     } finally {
@@ -174,7 +191,9 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
     }
     setLoadingReportId(reportId);
     try {
-      const detail = await apiClient.get<ReportDetailOut>(`/reports/${encodeURIComponent(reportId)}`);
+      const detail = await apiClient.get<ReportDetailOut>(
+        `/reports/${encodeURIComponent(reportId)}?period=${encodeURIComponent(fiscalPeriod)}`
+      );
       setActiveReportDetail(detail);
       setPreviewModalOpen(true);
     } catch (err) {
@@ -184,104 +203,160 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
     }
   };
 
-  const handleDownloadSuiteCsv = async (suiteId: string, suiteTitle: string) => {
+  const triggerBlobDownload = async (
+    reportId: string,
+    format: 'pdf' | 'xlsx' | 'csv',
+    title: string
+  ) => {
     if (mode === 'demo') {
-      auditService.exportCsvRows(
-        `CompanyAudit_${suiteId}_Demo.csv`,
-        ['Department', 'Audit Health Score', 'Target', 'Open Findings', 'Remediation Velocity'],
-        [
-          ['Finance & Treasury', '94%', '85%', 2, '96.2%'],
-          ['Human Resources & Equity', '89%', '85%', 1, '93.5%'],
-          ['Customer Operations & Support', '86%', '85%', 2, '91.0%'],
-          ['Information Technology & SecOps', '76%', '85%', 6, '84.8%'],
-        ]
-      );
-      onNotify(`Downloaded structured CSV data pack for "${suiteTitle}" (Demo).`);
+      if (format === 'csv') {
+        auditService.exportCsvRows(
+          `CompanyAudit_${reportId}_Demo.csv`,
+          ['Department', 'Audit Health Score', 'Target', 'Open Findings', 'Remediation Velocity'],
+          [
+            ['Finance & Treasury', '94%', '85%', 2, '96.2%'],
+            ['Human Resources & Equity', '89%', '85%', 1, '93.5%'],
+            ['Customer Operations & Support', '86%', '85%', 2, '91.0%'],
+            ['Information Technology & SecOps', '76%', '85%', 6, '84.8%'],
+          ]
+        );
+        onNotify(`Downloaded structured CSV data pack for "${title}" (Demo).`);
+      } else if (format === 'pdf') {
+        setActiveReportDetail(null);
+        setPreviewModalOpen(true);
+        setTimeout(() => window.print(), 150);
+      } else {
+        onNotify(`Real binary XLSX workbook generation runs in Live PostgreSQL API Mode.`);
+      }
       return;
     }
 
-    if (suiteId === 'rep-ai') {
-      navigate('/ai-assistant');
-      return;
+    if (reportId === 'rep-ai' && format === 'csv') {
+      // Allow export if requested directly, or navigate when using primary action
     }
 
-    setLoadingReportId(suiteId);
+    const key = `${reportId}-${format}`;
+    setExportingKey(key);
     try {
-      const detail = await apiClient.get<ReportDetailOut>(`/reports/${encodeURIComponent(suiteId)}`);
-      auditService.exportCsvRows(
-        `CompanyAudit_${detail.id}_${new Date().toISOString().slice(0, 10)}.csv`,
-        detail.csv_headers,
-        detail.csv_rows
+      const { blob, filename } = await apiClient.downloadBlob(
+        `/reports/${encodeURIComponent(reportId)}/export?format=${format}&period=${encodeURIComponent(fiscalPeriod)}`
       );
-      onNotify(`Generated & exported "${detail.title}" CSV (${detail.csv_rows.length} rows).`);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      onNotify(`Exported ${filename} (${format.toUpperCase()}) from live PostgreSQL telemetry.`);
     } catch (err) {
-      onNotify(err instanceof ApiError ? err.detail : 'Report export failed.');
+      onNotify(err instanceof ApiError ? err.detail : `Failed to export ${format.toUpperCase()} report.`);
     } finally {
-      setLoadingReportId(null);
+      setExportingKey(null);
     }
   };
 
-  const handleExportDataPack = () => {
-    if (mode === 'api' && boardDetail) {
-      auditService.exportCsvRows(
-        `CompanyAudit_${boardDetail.id}_DataPack.csv`,
-        boardDetail.csv_headers,
-        boardDetail.csv_rows
-      );
-      onNotify(`Exported live PostgreSQL Data Pack (${boardDetail.csv_rows.length} audit schedules).`);
+  const handleAddRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canManageDistributions || !ruleTitle.trim() || !ruleRecipients.trim()) return;
+
+    if (mode === 'demo') {
+      const created: DistributionRule = {
+        id: `dist-${distributions.length + 1}`,
+        title: ruleTitle.trim(),
+        scheduleSummary: `${ruleSchedule.trim()} • ${ruleRecipients.trim()} (${ruleFormat.toUpperCase()})`,
+        nextRun: 'Next Scheduled Dispatch',
+        status: 'Active',
+        icon: 'mail',
+      };
+      setDistributions((prev) => [created, ...prev]);
+      setRuleTitle('');
+      setNewRuleOpen(false);
+      onNotify(`Created scheduled briefing rule: ${created.title} (Demo).`);
       return;
     }
-    auditService.exportCsvRows(
-      'GRC-2025-Q4-EXEC_Fiduciary_Assurance_DataPack.csv',
-      ['Department', 'Audit Health Score', 'Target', 'Open Findings', 'Remediation Velocity'],
-      [
-        ['Finance & Treasury', '94%', '85%', 2, '96.2%'],
-        ['Human Resources & Equity', '89%', '85%', 1, '93.5%'],
-        ['Customer Operations & Support', '86%', '85%', 2, '91.0%'],
-        ['Information Technology & SecOps', '76%', '85%', 6, '84.8%'],
-      ]
-    );
-    onNotify('Exported Q4 2025 Fiduciary Assurance CSV Data Pack (Demo).');
+
+    setSavingRule(true);
+    try {
+      const payload: DistributionRuleCreate = {
+        name: ruleTitle.trim(),
+        schedule_label: ruleSchedule.trim(),
+        recipients: ruleRecipients.trim(),
+        report_suite_id: ruleSuiteId,
+        export_format: ruleFormat,
+        icon: 'mail',
+        is_active: true,
+      };
+      const created = await apiClient.post<DistributionRuleOut>('/reports/distributions', payload);
+      setApiDistributions((prev) => [created, ...prev]);
+      setRuleTitle('');
+      setNewRuleOpen(false);
+      onNotify(`Saved scheduled distribution rule "${created.name}" to PostgreSQL.`);
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to create distribution rule.');
+    } finally {
+      setSavingRule(false);
+    }
   };
 
-  const handleAddRule = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canManageDistributions || !ruleTitle.trim()) return;
-    const created: DistributionRule = {
-      id: `dist-${distributions.length + 1}`,
-      title: ruleTitle.trim(),
-      scheduleSummary: ruleSchedule,
-      nextRun: 'Next: Friday, 09:00 EST',
-      status: 'Active',
-      icon: 'mail',
-    };
-    setDistributions((prev) => [created, ...prev]);
-    setRuleTitle('');
-    setNewRuleOpen(false);
-    onNotify(`Created scheduled briefing rule: ${created.title}`);
+  const handleToggleDistribution = async (rule: DistributionRuleOut) => {
+    if (!canManageDistributions || mode !== 'api') return;
+    try {
+      const updated = await apiClient.put<DistributionRuleOut>(
+        `/reports/distributions/${rule.id}`,
+        { is_active: !rule.is_active }
+      );
+      setApiDistributions((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      onNotify(`Distribution rule "${updated.name}" marked ${updated.is_active ? 'Active' : 'Paused'}.`);
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to toggle distribution rule.');
+    }
   };
 
-  const compositeScore = dashboard ? Math.round(dashboard.composite_score) : 82;
-  const openFindingsCount = dashboard ? dashboard.open_findings_count : 18;
-  const criticalHighRisks = dashboard ? dashboard.critical_high_risks_count : 3;
-  const slaVelocity = dashboard ? dashboard.sla_compliance_pct : 91.4;
-  const forecastSlope = dashboard?.forecast?.slope_per_month ?? 1.4;
-  const completedAudits = dashboard ? dashboard.completed_audits_count : 5;
-  const totalAudits = dashboard ? dashboard.total_audits_count : 7;
+  const handleDeleteDistribution = async (rule: DistributionRuleOut) => {
+    if (!canManageDistributions || mode !== 'api') return;
+    try {
+      await apiClient.delete(`/reports/distributions/${rule.id}`);
+      setApiDistributions((prev) => prev.filter((r) => r.id !== rule.id));
+      onNotify(`Deleted distribution rule "${rule.name}".`);
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to delete distribution rule.');
+    }
+  };
+
+  const isApi = mode === 'api';
+  const compositeScore = isApi ? (dashboard ? Math.round(dashboard.composite_score) : null) : 82;
+  const openFindingsCount = isApi ? (dashboard ? dashboard.open_findings_count : null) : 18;
+  const criticalHighRisks = isApi ? (dashboard ? dashboard.critical_high_risks_count : null) : 3;
+  const slaVelocity = isApi ? (dashboard ? dashboard.sla_compliance_pct : null) : 91.4;
+  const forecastSlope = isApi ? (dashboard?.forecast?.slope_per_month ?? null) : 1.4;
+  const completedAudits = isApi ? (dashboard ? dashboard.completed_audits_count : null) : 5;
+  const totalAudits = isApi ? (dashboard ? dashboard.total_audits_count : null) : 7;
+
+  const frameworkList = dashboard?.framework_compliance ?? [];
+  const evaluatedFrameworks = isApi
+    ? frameworkList.filter((f) => f.controls_evaluated > 0).length
+    : 4;
+  const totalFrameworks = isApi ? frameworkList.length : 4;
+  const frameworkCodesLabel = isApi
+    ? frameworkList.slice(0, 4).map((f) => f.framework).join(' • ') || 'Awaiting framework controls'
+    : 'SOC 2 • ISO 27001 • GDPR • SOX 404';
 
   const deptShowcase = useMemo(() => {
-    if (mode === 'api' && dashboard) {
+    if (mode === 'api') {
+      if (!dashboard) return [];
       return dashboard.departments.slice(0, 4).map((d) => ({
         name: d.name,
-        score: Math.round(d.score ?? 0),
+        score: d.score !== null ? Math.round(d.score) : null,
         attention: d.attention_area,
       }));
     }
     return [
-      { name: 'Finance', score: 94, attention: false },
-      { name: 'HR Governance', score: 89, attention: false },
-      { name: 'Customer Ops', score: 86, attention: false },
-      { name: 'IT & SecOps', score: 76, attention: true },
+      { name: 'Finance', score: 94 as number | null, attention: false },
+      { name: 'HR Governance', score: 89 as number | null, attention: false },
+      { name: 'Customer Ops', score: 86 as number | null, attention: false },
+      { name: 'IT & SecOps', score: 76 as number | null, attention: true },
     ];
   }, [mode, dashboard]);
 
@@ -347,44 +422,65 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
       <section aria-label="Reporting Readiness Metrics" className="grid grid-cols-1 md:grid-cols-3 gap-5">
         <KpiCard
           eyebrow="Audit Health Index"
-          badgeText={compositeScore >= 85 ? 'Target Met' : 'Tracking'}
+          badgeText={
+            compositeScore === null
+              ? 'Loading'
+              : compositeScore >= (dashboard?.enterprise_target ?? 85)
+                ? 'Target Met'
+                : 'Tracking'
+          }
           badgeTone="secondary"
           badgeIcon={<span className="w-1.5 h-1.5 rounded-full bg-secondary" />}
-          value={String(compositeScore)}
+          value={compositeScore !== null ? String(compositeScore) : '—'}
           suffix={<span className="text-headline-md text-on-surface-variant font-medium">/ 100</span>}
           footerLeft={
             <span className="inline-flex items-center gap-1 font-semibold text-on-surface">
               <TrendingUp className="w-4 h-4 text-secondary" />{' '}
-              {forecastSlope >= 0 ? '+' : ''}
-              {forecastSlope}%/mo slope
+              {forecastSlope !== null
+                ? isApi && dashboard?.forecast?.is_sufficient_for_forecast === false
+                  ? 'Forecast needs >=3 monthly points'
+                  : `${forecastSlope >= 0 ? '+' : ''}${forecastSlope}%/mo slope`
+                : 'Syncing telemetry...'}
             </span>
           }
-          footerRight={dashboard ? `${dashboard.enterprise_target}% Target` : 'Compliant Tier-1'}
-          progress={compositeScore}
+          footerRight={dashboard ? `${dashboard.enterprise_target}% Target` : isApi ? 'Enterprise Target' : 'Compliant Tier-1'}
+          progress={compositeScore ?? 0}
         />
 
         <KpiCard
           eyebrow="Statutory Frameworks"
-          badgeText="Current"
+          badgeText={isApi ? (dashboard ? 'Evaluated' : 'Syncing') : 'Current'}
           badgeTone="info"
           badgeIcon={<BadgeCheck className="w-3.5 h-3.5" />}
-          value="4 / 4"
+          value={isApi && !dashboard ? '—' : `${evaluatedFrameworks} / ${totalFrameworks}`}
           suffix={<span className="text-headline-sm text-secondary font-bold">Tracked</span>}
-          footerLeft={<span className="font-mono text-label-sm">SOC 2 • ISO 27001 • GDPR • SOX 404</span>}
-          footerRight={<span className="text-secondary font-semibold">100% Scope</span>}
-          progress={100}
+          footerLeft={<span className="font-mono text-label-sm">{frameworkCodesLabel}</span>}
+          footerRight={
+            <span className="text-secondary font-semibold">
+              {totalFrameworks > 0 ? `${Math.round((evaluatedFrameworks / totalFrameworks) * 100)}% Scope` : '0% Scope'}
+            </span>
+          }
+          progress={totalFrameworks > 0 ? Math.round((evaluatedFrameworks / totalFrameworks) * 100) : 0}
         />
 
         <KpiCard
           eyebrow="Audit Pack Readiness"
-          badgeText="Validated"
+          badgeText={completedAudits !== null ? 'Validated' : 'Syncing'}
           badgeTone="neutral"
           badgeIcon={<Lock className="w-3.5 h-3.5" />}
-          value={`${completedAudits} / ${totalAudits}`}
+          value={completedAudits !== null && totalAudits !== null ? `${completedAudits} / ${totalAudits}` : '—'}
           suffix={<span className="text-headline-sm text-on-surface font-semibold">Audits</span>}
-          footerLeft={`${openFindingsCount} open findings across portfolio`}
-          footerRight={<span className="font-medium text-on-surface">Live Snapshot</span>}
-          progress={totalAudits > 0 ? Math.round((completedAudits / totalAudits) * 100) : 100}
+          footerLeft={
+            openFindingsCount !== null
+              ? `${openFindingsCount} open findings across portfolio`
+              : 'Loading open findings...'
+          }
+          footerRight={<span className="font-medium text-on-surface">{isApi ? 'Live Snapshot' : 'Demo Snapshot'}</span>}
+          progress={
+            totalAudits !== null && totalAudits > 0 && completedAudits !== null
+              ? Math.round((completedAudits / totalAudits) * 100)
+              : 0
+          }
           progressFillClass="bg-primary-container"
         />
       </section>
@@ -397,7 +493,7 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
             <div className="flex items-center gap-3 flex-wrap">
               <StatusBadge tone="navy">Quarterly Flagship Deliverable</StatusBadge>
               <span className="font-mono text-label-sm text-on-surface-variant">
-                REF: GRC-2025-EXEC • LIVE TELEMETRY
+                REF: GRC-2025-EXEC • {isApi ? 'LIVE POSTGRESQL TELEMETRY' : 'DEMO SNAPSHOT'}
               </span>
             </div>
 
@@ -414,7 +510,7 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-label-md text-on-surface-variant pt-1">
               <span className="inline-flex items-center gap-1.5">
                 <Calendar className="w-4 h-4 text-secondary" /> Generated{' '}
-                {boardDetail ? new Date(boardDetail.generated_at).toLocaleDateString() : 'Live'}
+                {boardDetail ? new Date(boardDetail.generated_at).toLocaleDateString() : isApi ? 'Pending' : 'Live'}
               </span>
               <span className="text-outline-variant">•</span>
               <span className="inline-flex items-center gap-1.5">
@@ -422,11 +518,11 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
               </span>
               <span className="text-outline-variant">•</span>
               <span className="inline-flex items-center gap-1.5">
-                <ListChecks className="w-4 h-4 text-secondary" /> {totalAudits} Audit Schedules
+                <ListChecks className="w-4 h-4 text-secondary" /> {totalAudits ?? '—'} Audit Schedules
               </span>
               <span className="text-outline-variant">•</span>
               <span className="inline-flex items-center gap-1.5 text-error font-semibold">
-                <Flag className="w-4 h-4" /> {openFindingsCount} Open Findings
+                <Flag className="w-4 h-4" /> {openFindingsCount ?? '—'} Open Findings
               </span>
             </div>
           </div>
@@ -434,25 +530,36 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
           {/* Inline Functional Breakdown */}
           <div className="bg-surface-container-low/80 border border-border-hairline/70 rounded-xl p-5 flex flex-col gap-4">
             <span className="text-headline-sm text-primary font-bold">Audited Divisional Performance Breakdown</span>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              {deptShowcase.map((d) => (
-                <div key={d.name} className="flex flex-col gap-1.5">
-                  <div className="flex justify-between text-label-sm gap-1">
-                    <span className="text-on-surface-variant font-medium truncate" title={d.name}>
-                      {d.name}
-                    </span>
-                    <span className={`font-mono font-bold ${d.attention ? 'text-error' : 'text-on-surface'}`}>
-                      {d.score}%
-                    </span>
+            {deptShowcase.length === 0 ? (
+              <div className="text-body-sm text-outline py-2">
+                {loading ? 'Loading live departmental scorecards...' : 'No divisional telemetry available for selected period.'}
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                {deptShowcase.map((d) => (
+                  <div key={d.name} className="flex flex-col gap-1.5">
+                    <div className="flex justify-between text-label-sm gap-1">
+                      <span className="text-on-surface-variant font-medium truncate" title={d.name}>
+                        {d.name}
+                      </span>
+                      <span className={`font-mono font-bold ${d.attention ? 'text-error' : 'text-on-surface'}`}>
+                        {d.score !== null ? `${d.score}%` : 'Unrated'}
+                      </span>
+                    </div>
+                    <ProgressBar
+                      value={d.score ?? 0}
+                      heightClass="h-1.5"
+                      fillClass={d.attention ? 'bg-error' : 'bg-secondary'}
+                    />
                   </div>
-                  <ProgressBar value={d.score} heightClass="h-1.5" fillClass={d.attention ? 'bg-error' : 'bg-secondary'} />
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
 
             <div className="flex items-center justify-between pt-2 border-t border-surface-container text-on-surface-variant text-body-sm">
               <span className="inline-flex items-center gap-1.5 font-medium text-on-surface">
-                <Gauge className="w-4 h-4 text-secondary" /> SLA Compliance Velocity: {slaVelocity}% on-time
+                <Gauge className="w-4 h-4 text-secondary" /> SLA Compliance Velocity:{' '}
+                {slaVelocity !== null ? `${slaVelocity}% on-time` : '—'}
               </span>
               <span className="font-mono text-label-sm text-secondary font-semibold">
                 Target: {dashboard?.enterprise_target ?? 85}.0%
@@ -461,22 +568,41 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
           </div>
 
           {/* Quick Action Buttons */}
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
               onClick={() => openReportPreview('rep-board')}
               className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-primary-container text-on-primary text-label-lg hover:bg-primary shadow-exec-sm transition-colors"
             >
               <Eye className="w-4 h-4" />
-              <span>Preview Full Briefing</span>
+              <span>Preview Briefing</span>
             </button>
             <button
               type="button"
-              onClick={handleExportDataPack}
-              className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-surface-container-low border border-border-hairline text-on-surface text-label-lg hover:bg-surface-container transition-colors"
+              disabled={exportingKey === 'rep-board-pdf'}
+              onClick={() => triggerBlobDownload('rep-board', 'pdf', 'Board Audit Package')}
+              className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-secondary text-on-secondary text-label-lg hover:bg-secondary-container disabled:opacity-50 transition-colors shadow-exec-sm"
+            >
+              <Download className="w-4 h-4" />
+              <span>{exportingKey === 'rep-board-pdf' ? 'Generating PDF...' : 'Download PDF'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={exportingKey === 'rep-board-xlsx'}
+              onClick={() => triggerBlobDownload('rep-board', 'xlsx', 'Board Audit Package')}
+              className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-surface-container-low border border-border-hairline text-on-surface text-label-lg hover:bg-surface-container disabled:opacity-50 transition-colors"
             >
               <FileSpreadsheet className="w-4 h-4 text-secondary" />
-              <span>Export CSV Data Pack</span>
+              <span>{exportingKey === 'rep-board-xlsx' ? 'Exporting...' : 'Export XLSX'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={exportingKey === 'rep-board-csv'}
+              onClick={() => triggerBlobDownload('rep-board', 'csv', 'Board Audit Package')}
+              className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-surface-container-low border border-border-hairline text-on-surface text-label-lg hover:bg-surface-container disabled:opacity-50 transition-colors"
+            >
+              <Download className="w-4 h-4 text-secondary" />
+              <span>CSV Pack</span>
             </button>
             <button
               type="button"
@@ -484,10 +610,10 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
                 setPreviewModalOpen(true);
                 setTimeout(() => window.print(), 150);
               }}
-              className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-secondary-fixed text-on-secondary-fixed text-label-lg hover:bg-primary-fixed transition-colors sm:ml-auto"
+              className="inline-flex items-center gap-2 h-10 px-3.5 rounded-lg bg-secondary-fixed text-on-secondary-fixed text-label-md hover:bg-primary-fixed transition-colors xl:ml-auto"
             >
               <Printer className="w-4 h-4" />
-              <span>Print / Save PDF</span>
+              <span>Print</span>
             </button>
           </div>
         </div>
@@ -520,7 +646,8 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
                   Enterprise Fiduciary Assurance
                 </span>
                 <span className="text-body-sm text-on-primary-container mt-0.5">
-                  {dashboard?.company_name || 'CompanyAudit Enterprise'} • {fiscalPeriod}
+                  {dashboard?.company_name || (isApi ? 'Enterprise Telemetry' : 'CompanyAudit Enterprise')} •{' '}
+                  {fiscalPeriod}
                 </span>
               </div>
             </div>
@@ -530,24 +657,32 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
                 <span className="flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 text-secondary" /> Composite Score
                 </span>
-                <span className="font-mono font-bold text-on-surface">{compositeScore}%</span>
+                <span className="font-mono font-bold text-on-surface">
+                  {compositeScore !== null ? `${compositeScore}%` : '—'}
+                </span>
               </div>
               <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-surface-container-low">
                 <span className="flex items-center gap-2">
                   <Shield className="w-4 h-4 text-secondary" /> SLA Compliance
                 </span>
-                <span className="font-mono font-bold text-secondary">{slaVelocity}%</span>
+                <span className="font-mono font-bold text-secondary">
+                  {slaVelocity !== null ? `${slaVelocity}%` : '—'}
+                </span>
               </div>
               <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-surface-container-low">
                 <span className="flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-error" /> Critical / High Risks
                 </span>
-                <span className="font-mono font-bold text-error">{criticalHighRisks} ACTIVE</span>
+                <span className="font-mono font-bold text-error">
+                  {criticalHighRisks !== null ? `${criticalHighRisks} ACTIVE` : '—'}
+                </span>
               </div>
             </div>
 
             <div className="flex items-center justify-between pt-1">
-              <span className="font-mono text-label-sm text-outline">Database Grounded</span>
+              <span className="font-mono text-label-sm text-outline">
+                {isApi ? 'Database Grounded' : 'Demo Snapshot'}
+              </span>
               <button
                 type="button"
                 onClick={() => openReportPreview('rep-board')}
@@ -633,33 +768,47 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between pt-4 mt-5 border-t border-surface-container">
-                  <button
-                    type="button"
-                    disabled={loadingReportId === suite.id}
-                    onClick={() => handleDownloadSuiteCsv(suite.id, suite.title)}
-                    className="text-secondary text-label-lg hover:underline inline-flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    {suite.onDemand ? (
+                <div className="flex items-center justify-between gap-2 pt-4 mt-5 border-t border-surface-container flex-wrap">
+                  {suite.id === 'rep-ai' ? (
+                    <button
+                      type="button"
+                      onClick={() => navigate('/ai-assistant')}
+                      className="text-secondary text-label-lg hover:underline inline-flex items-center gap-1.5"
+                    >
                       <Zap className="w-4 h-4" />
-                    ) : (
-                      <Download className="w-4 h-4" />
-                    )}
-                    <span>
-                      {loadingReportId === suite.id
-                        ? 'Exporting...'
-                        : suite.id === 'rep-ai'
-                          ? 'Open AI Copilot'
-                          : 'Export CSV Pack'}
-                    </span>
-                  </button>
+                      <span>Open AI Copilot</span>
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      {(['pdf', 'xlsx', 'csv'] as const).map((fmt) => {
+                        const isExporting = exportingKey === `${suite.id}-${fmt}`;
+                        return (
+                          <button
+                            key={fmt}
+                            type="button"
+                            disabled={isExporting || loadingReportId === suite.id}
+                            onClick={() => void triggerBlobDownload(suite.id, fmt, suite.title)}
+                            aria-label={`Export ${fmt.toUpperCase()} for ${suite.title}`}
+                            className={`h-7 px-2.5 rounded-md font-mono text-label-sm font-bold transition-colors disabled:opacity-50 ${
+                              fmt === 'pdf'
+                                ? 'bg-secondary text-on-secondary hover:bg-secondary-container'
+                                : 'bg-surface-container-low border border-border-hairline text-on-surface hover:bg-surface-container'
+                            }`}
+                          >
+                            {isExporting ? '...' : fmt.toUpperCase()}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   <button
                     type="button"
                     disabled={loadingReportId === suite.id}
                     onClick={() => openReportPreview(suite.id)}
-                    className="text-on-surface-variant text-label-md hover:text-on-surface"
+                    className="text-on-surface-variant text-label-md hover:text-on-surface inline-flex items-center gap-1"
                   >
-                    Inspect Briefing
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{loadingReportId === suite.id ? 'Loading...' : 'Inspect'}</span>
                   </button>
                 </div>
               </div>
@@ -700,43 +849,97 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
         </div>
 
         <div className="flex flex-col gap-3">
-          {distributions.map((rule) => (
-            <div
-              key={rule.id}
-              className="flex flex-col md:flex-row md:items-center justify-between p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60 hover:bg-surface-container transition-colors gap-3"
-            >
-              <div className="flex items-center gap-3.5">
-                {rule.icon === 'mail' ? (
-                  <MailCheck className="w-5 h-5 text-secondary shrink-0" />
-                ) : rule.icon === 'hub' ? (
-                  <Network className="w-5 h-5 text-secondary shrink-0" />
-                ) : (
-                  <CloudUpload className="w-5 h-5 text-secondary shrink-0" />
-                )}
-                <div>
-                  <span className="text-headline-sm text-on-surface font-semibold block">{rule.title}</span>
-                  <span className="text-body-sm text-on-surface-variant">{rule.scheduleSummary}</span>
+          {mode === 'api' ? (
+            apiDistributions.length === 0 ? (
+              <div className="p-5 rounded-xl bg-surface-container-low/70 border border-border-hairline text-body-sm text-on-surface-variant">
+                No automated distribution rules saved in PostgreSQL yet.
+              </div>
+            ) : (
+              apiDistributions.map((rule) => (
+                <div
+                  key={rule.id}
+                  className="flex flex-col md:flex-row md:items-center justify-between p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60 hover:bg-surface-container transition-colors gap-3"
+                >
+                  <div className="flex items-center gap-3.5">
+                    {rule.icon === 'hub' ? (
+                      <Network className="w-5 h-5 text-secondary shrink-0" />
+                    ) : rule.icon === 'cloud' ? (
+                      <CloudUpload className="w-5 h-5 text-secondary shrink-0" />
+                    ) : (
+                      <MailCheck className="w-5 h-5 text-secondary shrink-0" />
+                    )}
+                    <div>
+                      <span className="text-headline-sm text-on-surface font-semibold block">{rule.name}</span>
+                      <span className="text-body-sm text-on-surface-variant">
+                        {rule.schedule_label} • {rule.recipients}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2.5 ml-auto md:ml-0 flex-wrap">
+                    <span className="font-mono text-label-sm text-on-surface-variant bg-surface-container-lowest border border-border-hairline px-2.5 py-1 rounded-lg uppercase">
+                      {rule.report_suite_id} ({rule.export_format})
+                    </span>
+                    <StatusBadge dot tone={rule.is_active ? 'success' : 'neutral'}>
+                      {rule.is_active ? 'Active' : 'Paused'}
+                    </StatusBadge>
+                    {canManageDistributions && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleToggleDistribution(rule)}
+                          title={rule.is_active ? 'Pause rule' : 'Activate rule'}
+                          aria-label={rule.is_active ? `Pause ${rule.name}` : `Activate ${rule.name}`}
+                          className="p-1.5 rounded-lg border border-border-hairline bg-surface-container-lowest text-on-surface-variant hover:text-secondary transition-colors"
+                        >
+                          {rule.is_active ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteDistribution(rule)}
+                          title="Delete distribution rule"
+                          aria-label={`Delete ${rule.name}`}
+                          className="p-1.5 rounded-lg border border-border-hairline bg-surface-container-lowest text-on-surface-variant hover:text-error transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))
+            )
+          ) : (
+            distributions.map((rule) => (
+              <div
+                key={rule.id}
+                className="flex flex-col md:flex-row md:items-center justify-between p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline/60 hover:bg-surface-container transition-colors gap-3"
+              >
+                <div className="flex items-center gap-3.5">
+                  {rule.icon === 'mail' ? (
+                    <MailCheck className="w-5 h-5 text-secondary shrink-0" />
+                  ) : rule.icon === 'hub' ? (
+                    <Network className="w-5 h-5 text-secondary shrink-0" />
+                  ) : (
+                    <CloudUpload className="w-5 h-5 text-secondary shrink-0" />
+                  )}
+                  <div>
+                    <span className="text-headline-sm text-on-surface font-semibold block">{rule.title}</span>
+                    <span className="text-body-sm text-on-surface-variant">{rule.scheduleSummary}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-4 ml-auto md:ml-0">
+                  <span className="font-mono text-label-sm text-on-surface-variant bg-surface-container-lowest border border-border-hairline px-3 py-1 rounded-lg">
+                    {rule.nextRun}
+                  </span>
+                  <StatusBadge dot tone="success">
+                    {rule.status}
+                  </StatusBadge>
                 </div>
               </div>
-
-              <div className="flex items-center gap-4 ml-auto md:ml-0">
-                <span className="font-mono text-label-sm text-on-surface-variant bg-surface-container-lowest border border-border-hairline px-3 py-1 rounded-lg">
-                  {rule.nextRun}
-                </span>
-                <StatusBadge dot tone="success">
-                  {rule.status}
-                </StatusBadge>
-                <button
-                  type="button"
-                  onClick={() => openReportPreview('rep-board')}
-                  className="text-on-surface-variant hover:text-on-surface p-1.5 rounded-lg hover:bg-surface-container-lowest transition-colors"
-                  aria-label="Inspect distribution payload"
-                >
-                  <MoreVertical className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          ))}
+            ))
+          )}
         </div>
       </section>
 
@@ -771,11 +974,15 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
                 </div>
                 <div>
                   <span className="text-label-sm uppercase text-outline block">Composite Score</span>
-                  <strong className="text-secondary font-mono">{compositeScore} / 100</strong>
+                  <strong className="text-secondary font-mono">
+                    {compositeScore !== null ? `${compositeScore} / 100` : '—'}
+                  </strong>
                 </div>
                 <div>
                   <span className="text-label-sm uppercase text-outline block">SLA Compliance</span>
-                  <strong className="font-mono text-label-sm">{slaVelocity}% ON-TIME</strong>
+                  <strong className="font-mono text-label-sm">
+                    {slaVelocity !== null ? `${slaVelocity}% ON-TIME` : '—'}
+                  </strong>
                 </div>
               </div>
 
@@ -818,7 +1025,9 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
                             {item.note && <div className="text-body-sm text-on-surface-variant">{item.note}</div>}
                           </div>
                           <div className="text-right font-mono text-label-md shrink-0">
-                            <div className="font-bold text-error">{item.score ?? 0}% / {item.target}%</div>
+                            <div className="font-bold text-error">
+                              {item.score !== null && item.score !== undefined ? `${item.score}%` : 'Unrated'} / {item.target}%
+                            </div>
                             <div className="text-label-sm text-outline">{item.open_findings} open findings</div>
                           </div>
                         </div>
@@ -829,7 +1038,7 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
               ))}
             </div>
 
-            <div className="px-6 py-4 bg-surface-container-low border-t border-border-hairline flex flex-wrap justify-end gap-3">
+            <div className="px-6 py-4 bg-surface-container-low border-t border-border-hairline flex flex-wrap justify-end gap-2.5">
               <button
                 type="button"
                 onClick={() => setPreviewModalOpen(false)}
@@ -839,30 +1048,53 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  if (modalReport) {
-                    auditService.exportCsvRows(
-                      `CompanyAudit_${modalReport.id}_${new Date().toISOString().slice(0, 10)}.csv`,
-                      modalReport.csv_headers,
-                      modalReport.csv_rows
-                    );
-                    onNotify(`Downloaded structured CSV extract for "${modalReport.title}".`);
-                  } else {
-                    handleExportDataPack();
-                  }
-                }}
+                onClick={() =>
+                  void triggerBlobDownload(
+                    modalReport?.id || 'rep-board',
+                    'csv',
+                    modalReport?.title || 'Governance Briefing'
+                  )
+                }
                 className="h-10 px-4 rounded-lg bg-surface-container-highest text-primary text-label-lg inline-flex items-center gap-2"
               >
                 <Download className="w-4 h-4" />
-                <span>Download CSV Pack</span>
+                <span>CSV</span>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void triggerBlobDownload(
+                    modalReport?.id || 'rep-board',
+                    'xlsx',
+                    modalReport?.title || 'Governance Briefing'
+                  )
+                }
+                className="h-10 px-4 rounded-lg bg-surface-container-highest text-primary text-label-lg inline-flex items-center gap-2"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>XLSX</span>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void triggerBlobDownload(
+                    modalReport?.id || 'rep-board',
+                    'pdf',
+                    modalReport?.title || 'Governance Briefing'
+                  )
+                }
+                className="h-10 px-4 rounded-lg bg-secondary text-on-secondary text-label-lg inline-flex items-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download PDF</span>
               </button>
               <button
                 type="button"
                 onClick={() => window.print()}
-                className="h-10 px-4 rounded-lg bg-secondary text-on-secondary text-label-lg inline-flex items-center gap-2"
+                className="h-10 px-3.5 rounded-lg border border-border-hairline bg-surface-container-lowest text-label-md inline-flex items-center gap-2"
               >
                 <Printer className="w-4 h-4" />
-                <span>Print / Save PDF</span>
+                <span>Print</span>
               </button>
             </div>
           </div>
@@ -888,6 +1120,7 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
               <input
                 type="text"
                 required
+                minLength={3}
                 value={ruleTitle}
                 onChange={(e) => setRuleTitle(e.target.value)}
                 placeholder="e.g. Bi-Weekly SecOps SLA Exception Brief"
@@ -896,14 +1129,58 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
             </div>
             <div>
               <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
-                Cadence &amp; Recipients
+                Schedule Cadence
               </label>
               <input
                 type="text"
+                required
+                minLength={3}
                 value={ruleSchedule}
                 onChange={(e) => setRuleSchedule(e.target.value)}
                 className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-md"
               />
+            </div>
+            <div>
+              <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                Recipients
+              </label>
+              <input
+                type="text"
+                required
+                minLength={3}
+                value={ruleRecipients}
+                onChange={(e) => setRuleRecipients(e.target.value)}
+                placeholder="e.g. Board Audit Committee, CAO"
+                className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-md"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">Report Suite</label>
+                <select
+                  value={ruleSuiteId}
+                  onChange={(e) => setRuleSuiteId(e.target.value)}
+                  className="w-full h-10 px-3 rounded-lg border border-border-hairline text-body-sm bg-surface-container-lowest"
+                >
+                  <option value="rep-board">Executive Board Package</option>
+                  <option value="rep-statutory">Statutory Compliance</option>
+                  <option value="rep-risk">Enterprise Risk Matrix</option>
+                  <option value="rep-sla">SLA Velocity Pack</option>
+                  <option value="rep-dept">Departmental Scorecard</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">Format</label>
+                <select
+                  value={ruleFormat}
+                  onChange={(e) => setRuleFormat(e.target.value as 'pdf' | 'xlsx' | 'csv')}
+                  className="w-full h-10 px-3 rounded-lg border border-border-hairline text-body-sm bg-surface-container-lowest uppercase"
+                >
+                  <option value="pdf">PDF</option>
+                  <option value="xlsx">XLSX</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </div>
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <button
@@ -913,8 +1190,12 @@ export const ReportsInsightsPage: React.FC<ReportsInsightsPageProps> = ({ onNoti
               >
                 Cancel
               </button>
-              <button type="submit" className="h-9 px-4 rounded-lg bg-secondary text-on-secondary text-label-md">
-                Activate Rule
+              <button
+                type="submit"
+                disabled={savingRule}
+                className="h-9 px-4 rounded-lg bg-secondary text-on-secondary disabled:opacity-50 text-label-md"
+              >
+                {savingRule ? 'Saving...' : 'Activate Rule'}
               </button>
             </div>
           </form>

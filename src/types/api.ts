@@ -74,6 +74,10 @@ export interface UserUpdatePayload {
   certifications?: string[];
 }
 
+export interface AdminResetPasswordPayload {
+  new_password: string;
+}
+
 export interface CompanyProfileOut {
   id: string;
   legal_name: string;
@@ -89,6 +93,7 @@ export interface CompanyProfileOut {
   digest_frequency: string;
   sla_auto_escalate: boolean;
   ai_citation_strict: boolean;
+  sha_lock_enabled?: boolean;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -108,6 +113,7 @@ export interface CompanyProfileUpdate {
   digest_frequency?: string;
   sla_auto_escalate?: boolean;
   ai_citation_strict?: boolean;
+  sha_lock_enabled?: boolean;
 }
 
 export interface DepartmentOut {
@@ -153,6 +159,20 @@ export interface AuditScopeOut {
   system_or_process: string;
   regulatory_clause: string | null;
   in_scope: boolean;
+}
+
+export interface AuditScopeCreate {
+  scope_name: string;
+  system_or_process: string;
+  regulatory_clause?: string | null;
+  in_scope?: boolean;
+}
+
+export interface AuditScopeUpdate {
+  scope_name?: string;
+  system_or_process?: string;
+  regulatory_clause?: string | null;
+  in_scope?: boolean;
 }
 
 export interface AuditStageOut {
@@ -201,6 +221,7 @@ export interface AuditCreate {
   scheduled_start?: string | null;
   target_due_date?: string | null;
   summary?: string | null;
+  scopes?: AuditScopeCreate[];
 }
 
 export interface AuditUpdate {
@@ -212,6 +233,29 @@ export interface AuditUpdate {
   scheduled_start?: string | null;
   target_due_date?: string | null;
   summary?: string | null;
+}
+
+export interface ChecklistCreate {
+  code?: string;
+  title: string;
+  domain: AuditDomainLiteral;
+  framework: string;
+  version?: string;
+}
+
+export interface ChecklistItemCreate {
+  control_code: string;
+  title: string;
+  test_procedure: string;
+  weight?: number;
+  display_order?: number;
+}
+
+export interface ChecklistItemUpdate {
+  title?: string;
+  test_procedure?: string;
+  weight?: number;
+  display_order?: number;
 }
 
 export interface ChecklistItemOut {
@@ -351,6 +395,7 @@ export interface FindingOut {
   is_overdue: boolean;
   progress_percent: number;
   management_response: string | null;
+  rejection_reason?: string | null;
   signed_off_at: string | null;
   recommendations: RecommendationOut[];
   corrective_actions: CorrectiveActionOut[];
@@ -382,6 +427,7 @@ export interface FindingUpdate {
   owner_user_id?: string | null;
   target_sla_date?: string;
   management_response?: string | null;
+  rejection_reason?: string | null;
   sign_off?: boolean;
 }
 
@@ -491,12 +537,60 @@ export interface EvidenceOut {
   updated_at: string;
 }
 
+export interface EvidenceUpdate {
+  audit_id?: string | null;
+  finding_id?: string | null;
+  corrective_action_id?: string | null;
+  checklist_item_id?: string | null;
+  tag?: string | null;
+}
+
+export interface RiskEscalateRequest {
+  escalation_target?: string | null;
+  note?: string | null;
+}
+
+export interface DistributionRuleOut {
+  id: string;
+  company_id: string;
+  name: string;
+  schedule_label: string;
+  recipients: string;
+  report_suite_id: string;
+  export_format: 'pdf' | 'xlsx' | 'csv';
+  icon: string;
+  is_active: boolean;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DistributionRuleCreate {
+  name: string;
+  schedule_label: string;
+  recipients: string;
+  report_suite_id?: string;
+  export_format?: 'pdf' | 'xlsx' | 'csv';
+  icon?: string;
+  is_active?: boolean;
+}
+
+export interface DistributionRuleUpdate {
+  name?: string;
+  schedule_label?: string;
+  recipients?: string;
+  report_suite_id?: string;
+  export_format?: 'pdf' | 'xlsx' | 'csv';
+  is_active?: boolean;
+}
+
 export interface PerformanceTrendPoint {
   month: string;
   actual: number;
   target: number;
   baseline: number;
   predicted?: number | null;
+  audited_controls_count?: number;
 }
 
 export interface ForecastSummary {
@@ -509,6 +603,24 @@ export interface ForecastSummary {
   predicted_months_to_target: number | null;
   predicted_days_ahead_or_behind: number;
   confidence_label: string;
+  data_points_count?: number;
+  is_sufficient_for_forecast?: boolean;
+  methodology_note?: string;
+}
+
+export interface FrameworkComplianceOut {
+  framework: string;
+  controls_total: number;
+  controls_evaluated: number;
+  score: number;
+  status: 'Compliant' | 'Monitor' | 'Needs Attention' | 'Not Evaluated';
+}
+
+export interface EvidenceBreakdownOut {
+  total: number;
+  verified: number;
+  pending_review: number;
+  flagged: number;
 }
 
 export interface RiskMatrixCell {
@@ -538,9 +650,11 @@ export interface DashboardOverviewOut {
   active_audits_count: number;
   completed_audits_count: number;
   total_audits_count: number;
+  audit_completion_rate_pct?: number;
   open_findings_count: number;
   critical_findings_count: number;
   overdue_findings_count: number;
+  overdue_actions_count?: number;
   critical_high_risks_count: number;
   board_risk_threshold: number;
   sla_compliance_pct: number;
@@ -549,6 +663,9 @@ export interface DashboardOverviewOut {
   departments: DepartmentOut[];
   priority_signoffs: FindingOut[];
   risk_distribution: RiskDistributionOut;
+  framework_compliance?: FrameworkComplianceOut[];
+  evidence_breakdown?: EvidenceBreakdownOut;
+  kpi_methodology?: Record<string, string>;
 }
 
 export interface NotificationOut {
@@ -580,8 +697,29 @@ export interface AuditHistoryOut {
   action: string;
   changes_json: Record<string, unknown>;
   ip_address: string | null;
+  prev_event_sha256?: string | null;
   event_sha256: string;
   created_at: string;
+}
+
+export interface AuditHistoryVerifyOut {
+  valid: boolean;
+  total_events: number;
+  checked_events: number;
+  broken_event_ids: string[];
+  genesis_ok: boolean;
+  latest_event_sha256: string | null;
+  verified_at: string;
+  verification_note: string;
+}
+
+export interface SlaSweepResultOut {
+  notifications_created: number;
+  overdue_audits: number;
+  overdue_actions: number;
+  upcoming_deadlines: number;
+  critical_risks: number;
+  ran_at: string;
 }
 
 export interface ReportSuiteOut {
@@ -632,6 +770,12 @@ export interface AiCitation {
 
 export interface AiSynthesisResponse {
   answer: string;
+  verified_facts?: string[];
+  recommendations?: string[];
+  provider_status?: 'unavailable' | 'configured' | 'live_llm';
+  provider_name?: string;
+  provider_message?: string;
+  scoped_department?: string | null;
   citations: AiCitation[];
   metrics_snapshot: Record<string, unknown>;
   generated_at: string;

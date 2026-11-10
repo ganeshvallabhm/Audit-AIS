@@ -1,5 +1,5 @@
 import hashlib
-from datetime import date, datetime, timedelta, UTC
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -7,13 +7,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.security import compute_event_sha256, hash_password
+from app.core.security import hash_password
 from app.models.audit import Audit, AuditResponse, AuditScope, Checklist, ChecklistItem
 from app.models.core import Company, Department, User
 from app.models.domains import Customer, Employee, FinancialMetric, Project, ProjectTask
-from app.models.governance import CorrectiveAction, Evidence, Finding, Recommendation, Risk
-from app.models.telemetry import AuditHistory, Notification
+from app.models.governance import CorrectiveAction, DistributionRule, Evidence, Finding, Recommendation, Risk
+from app.models.telemetry import Notification
+from app.services.audit_history import record_audit_history
 from app.services.scoring import classify_risk_severity, recalculate_audit_score
+
+
+def _month_anchor(ref_dt: datetime, months_back: int) -> datetime:
+    """Returns a deterministic UTC datetime `months_back` calendar months prior."""
+    year = ref_dt.year
+    month = ref_dt.month - months_back
+    while month <= 0:
+        month += 12
+        year -= 1
+    day = min(15, ref_dt.day if months_back == 0 else 15)
+    return datetime(year, month, day, 14, 0, 0, tzinfo=UTC)
 
 
 def seed_database(
@@ -554,29 +566,27 @@ def seed_database(
             )
         )
 
-    # 6. Audit Responses (weighted checklist testing -> exact DB score calculation)
+    # 6. Audit Responses (weighted checklist testing -> chronological monthly DB calculation)
+    now_utc = datetime.now(UTC)
     response_rows = [
-        # AUD-2025-094 (Technology): (0.5*2.0 + 1.0*1.5 + 1.0*1.0) / 4.5 = 3.5 / 4.5 = 77.78%
-        ("AUD-2025-094", "CC6.1-IAM", "eleanor.vance@companyaudit.io", "Partial", 0.50, "Standing prod admins reduced; JIT MFA enforcement in final testing."),
-        ("AUD-2025-094", "CC6.7-KMS", "marcus.chen@companyaudit.io", "Pass", 1.00, "Secrets Manager rotation restored after daemon alert fix."),
-        ("AUD-2025-094", "CC6.8-BAK", "marcus.chen@companyaudit.io", "Pass", 1.00, "Default KMS EBS encryption verified in US-East production."),
-        # AUD-2025-081 (Financial): (0.5*2.0 + 1.0*2.0) / 4.0 -> or Pass/Partial mix = 87.5% / 94%
-        ("AUD-2025-081", "SOX-FIN-04", "marcus.chen@companyaudit.io", "Partial", 0.50, "Emergency role restricted; automated GRC transport awaiting cutover."),
-        ("AUD-2025-081", "SOX-REV-02", "marcus.chen@companyaudit.io", "Pass", 1.00, "100% ASC 606 cutoff sample reconciled without exceptions."),
-        # AUD-2025-072 (Customer): (1.0*1.5 + 1.0*1.0) / 2.5 = 100% or Partial = 80%
-        ("AUD-2025-072", "GDPR-30-A", "marcus.chen@companyaudit.io", "Pass", 1.00, "DSAR deletion SLA averages 11 days vs 30-day statutory cap."),
-        ("AUD-2025-072", "GDPR-32-B", "marcus.chen@companyaudit.io", "Partial", 0.50, "2 regional mid-market DPAs awaiting final countersignature."),
-        # AUD-2025-062 (HR - Closed): 1.0 -> 100%
-        ("AUD-2025-062", "HR-CMP-01", "lisa.patel@companyaudit.io", "Pass", 1.00, "All Q4 hires verified prior to Active Directory provisioning."),
-        ("AUD-2025-062", "HR-LMS-02", "lisa.patel@companyaudit.io", "Pass", 1.00, "LMS webhook remediation verified at 99.4% completion."),
-        # AUD-2025-099 (Project): (1.0*1.5 + 1.0*1.5)
-        ("AUD-2025-099", "PMO-CAP-03", "marcus.chen@companyaudit.io", "Pass", 1.00, "Stage-gate approvals intact for Phase 2 ERP wave."),
-        ("AUD-2025-099", "PMO-MIG-04", "marcus.chen@companyaudit.io", "Partial", 0.50, "2 sub-ledger currency rounding tolerances under review."),
-        # AUD-2025-108 (Compliance):
-        ("AUD-2025-108", "LGL-REG-01", "eleanor.vance@companyaudit.io", "Partial", 0.50, "11 of 18 APAC vendor SCC addendums signed."),
+        # Month -2 (~66.67% baseline wave)
+        ("AUD-2025-081", "SOX-FIN-04", "marcus.chen@companyaudit.io", "Partial", 0.50, "Emergency role restricted; automated GRC transport awaiting cutover.", 2),
+        ("AUD-2025-072", "GDPR-32-B", "marcus.chen@companyaudit.io", "Partial", 0.50, "2 regional mid-market DPAs awaiting final countersignature.", 2),
+        ("AUD-2025-062", "HR-CMP-01", "lisa.patel@companyaudit.io", "Pass", 1.00, "All Q4 hires verified prior to Active Directory provisioning.", 2),
+        # Month -1 (~78.13% mid-cycle remediation wave)
+        ("AUD-2025-081", "SOX-REV-02", "marcus.chen@companyaudit.io", "Pass", 1.00, "100% ASC 606 cutoff sample reconciled without exceptions.", 1),
+        ("AUD-2025-072", "GDPR-30-A", "marcus.chen@companyaudit.io", "Pass", 1.00, "DSAR deletion SLA averages 11 days vs 30-day statutory cap.", 1),
+        ("AUD-2025-062", "HR-LMS-02", "lisa.patel@companyaudit.io", "Pass", 1.00, "LMS webhook remediation verified at 99.4% completion.", 1),
+        ("AUD-2025-099", "PMO-MIG-04", "marcus.chen@companyaudit.io", "Partial", 0.50, "2 sub-ledger currency rounding tolerances under review.", 1),
+        ("AUD-2025-108", "LGL-REG-01", "eleanor.vance@companyaudit.io", "Partial", 0.50, "11 of 18 APAC vendor SCC addendums signed.", 1),
+        # Month 0 (~83.33% current readiness wave)
+        ("AUD-2025-094", "CC6.1-IAM", "eleanor.vance@companyaudit.io", "Partial", 0.50, "Standing prod admins reduced; JIT MFA enforcement in final testing.", 0),
+        ("AUD-2025-094", "CC6.7-KMS", "marcus.chen@companyaudit.io", "Pass", 1.00, "Secrets Manager rotation restored after daemon alert fix.", 0),
+        ("AUD-2025-094", "CC6.8-BAK", "marcus.chen@companyaudit.io", "Pass", 1.00, "Default KMS EBS encryption verified in US-East production.", 0),
+        ("AUD-2025-099", "PMO-CAP-03", "marcus.chen@companyaudit.io", "Pass", 1.00, "Stage-gate approvals intact for Phase 2 ERP wave.", 0),
     ]
     responses_by_key: dict[tuple[str, str], AuditResponse] = {}
-    for a_code, ctrl_code, u_email, val, factor, notes in response_rows:
+    for a_code, ctrl_code, u_email, val, factor, notes, months_back in response_rows:
         resp = AuditResponse(
             company_id=company.id,
             audit_id=audits[a_code].id,
@@ -585,6 +595,7 @@ def seed_database(
             response_value=val,
             score_factor=factor,
             auditor_notes=notes,
+            tested_at=_month_anchor(now_utc, months_back) if months_back > 0 else now_utc,
         )
         db.add(resp)
         responses_by_key[(a_code, ctrl_code)] = resp
@@ -1155,7 +1166,7 @@ def seed_database(
         ]
     )
 
-    # 13. Notifications
+    # 13. Notifications & Distribution Rules
     db.add_all(
         [
             Notification(
@@ -1168,6 +1179,7 @@ def seed_database(
                 entity_type="Finding",
                 entity_id=findings["FND-1021"].id,
                 target_link="/findings-and-actions",
+                dedup_key="seed_notif:fnd_1021",
             ),
             Notification(
                 company_id=company.id,
@@ -1179,6 +1191,7 @@ def seed_database(
                 entity_type="Finding",
                 entity_id=findings["FND-1015"].id,
                 target_link="/findings-and-actions",
+                dedup_key="seed_notif:fnd_1015",
             ),
             Notification(
                 company_id=company.id,
@@ -1190,6 +1203,7 @@ def seed_database(
                 entity_type="Audit",
                 entity_id=audits["AUD-2025-094"].id,
                 target_link="/reports",
+                dedup_key="seed_notif:board_snap",
             ),
             Notification(
                 company_id=company.id,
@@ -1201,44 +1215,74 @@ def seed_database(
                 entity_type="CorrectiveAction",
                 entity_id=actions_map["ACT-102"].id,
                 target_link="/findings-and-actions",
+                dedup_key="seed_notif:act_102",
             ),
         ]
     )
 
-    # 14. Append-Only Audit History Ledger
-    history_specs = [
-        (users["marcus.kane@companyaudit.io"], "Control Test", "Risk & Compliance", "Risk", risks["RSK-04"].id, "RSK-04", "Updated mitigation strategy with WAF canary telemetry", {"progress": 68}),
-        (users["eleanor.vance@companyaudit.io"], "Sign-Off", "Audit Management", "Audit", audits["AUD-2025-062"].id, "AUD-2025-062", "Completed final sign-off on HR Operational Compliance audit (Score: 100%)", {"status": "Closed"}),
-        (None, "Risk Escalation", "Findings & Actions", "Finding", findings["FND-1021"].id, "FND-1021", "Flagged SLA breach on AP Wire Segregation of Duties remediation", {"status": "Overdue"}),
-        (users["marcus.chen@companyaudit.io"], "Evidence", "Evidence Management", "Evidence", audits["AUD-2025-094"].id, "EVD-4091", "Uploaded SHA-256 verified CloudTrail rotation audit log", {"filename": "auth_token_audit.log"}),
-    ]
-    for actor, cat, mod, e_type, e_id, e_ref, act_txt, chg in history_specs:
-        payload = {
-            "company_id": str(company.id),
-            "actor_user_id": str(actor.id) if actor else None,
-            "category": cat,
-            "module": mod,
-            "entity_type": e_type,
-            "entity_id": str(e_id),
-            "entity_ref": e_ref,
-            "action": act_txt,
-            "changes": chg,
-        }
-        db.add(
-            AuditHistory(
+    db.add_all(
+        [
+            DistributionRule(
                 company_id=company.id,
-                actor_user_id=actor.id if actor else None,
-                actor_label=actor.full_name if actor else "System SLA Engine",
-                actor_role=(actor.job_title or actor.role) if actor else "Automated Governance",
-                category=cat,
-                module=mod,
-                entity_type=e_type,
-                entity_id=e_id,
-                entity_ref=e_ref,
-                action=act_txt,
-                changes_json=chg,
-                event_sha256=compute_event_sha256(payload),
-            )
+                created_by_user_id=users["eleanor.vance@companyaudit.io"].id,
+                name="Board Audit Committee Quarterly Brief",
+                schedule_label="Quarterly — 1st Business Day",
+                recipients="board-audit@companyaudit.io, eleanor.vance@companyaudit.io",
+                report_suite_id="rep-board",
+                export_format="pdf",
+                icon="building",
+                is_active=True,
+                last_run_at=now_utc - timedelta(days=12),
+            ),
+            DistributionRule(
+                company_id=company.id,
+                created_by_user_id=users["marcus.chen@companyaudit.io"].id,
+                name="Weekly Remediation SLA Digest",
+                schedule_label="Weekly — Mondays 08:00 EST",
+                recipients="dept-heads@companyaudit.io, marcus.chen@companyaudit.io",
+                report_suite_id="rep-sla",
+                export_format="xlsx",
+                icon="alarm",
+                is_active=True,
+                last_run_at=now_utc - timedelta(days=3),
+            ),
+            DistributionRule(
+                company_id=company.id,
+                created_by_user_id=users["eleanor.vance@companyaudit.io"].id,
+                name="Monthly Statutory & Risk Matrix Feed",
+                schedule_label="Monthly — Last Friday 18:00 EST",
+                recipients="risk-committee@companyaudit.io, deloitte-external@example.com",
+                report_suite_id="rep-risk",
+                export_format="csv",
+                icon="grid",
+                is_active=True,
+                last_run_at=now_utc - timedelta(days=7),
+            ),
+        ]
+    )
+
+    # 14. Append-Only Hash-Chained Audit History Ledger
+    history_specs = [
+        (users["marcus.kane@companyaudit.io"], "Control Test", "Risk & Compliance", "Risk", risks["RSK-04"].id, "RSK-04", "Updated mitigation strategy with WAF canary telemetry", {"progress": 68}, now_utc - timedelta(days=6)),
+        (users["eleanor.vance@companyaudit.io"], "Sign-Off", "Audit Management", "Audit", audits["AUD-2025-062"].id, "AUD-2025-062", "Completed final sign-off on HR Operational Compliance audit (Score: 100%)", {"status": "Closed"}, now_utc - timedelta(days=4)),
+        (None, "Risk Escalation", "Findings & Actions", "Finding", findings["FND-1021"].id, "FND-1021", "Flagged SLA breach on AP Wire Segregation of Duties remediation", {"status": "Overdue"}, now_utc - timedelta(days=2)),
+        (users["marcus.chen@companyaudit.io"], "Evidence", "Evidence Management", "Evidence", audits["AUD-2025-094"].id, "EVD-4091", "Uploaded SHA-256 verified CloudTrail rotation audit log", {"filename": "auth_token_audit.log"}, now_utc - timedelta(hours=4)),
+    ]
+    for actor, cat, mod, e_type, e_id, e_ref, act_txt, chg, ts in history_specs:
+        record_audit_history(
+            db,
+            company_id=company.id,
+            actor=actor,
+            category=cat,
+            module=mod,
+            entity_type=e_type,
+            entity_id=e_id,
+            entity_ref=e_ref,
+            action=act_txt,
+            changes=chg,
+            actor_label_override=actor.full_name if actor else "System SLA Engine",
+            actor_role_override=(actor.job_title or actor.role) if actor else "Automated Governance",
+            created_at_override=ts,
         )
 
     db.commit()

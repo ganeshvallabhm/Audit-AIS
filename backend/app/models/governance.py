@@ -38,6 +38,7 @@ class Finding(TimestampMixin, Base):
             name="ck_findings_status",
         ),
         Index("ix_findings_company_status_sev", "company_id", "status", "severity"),
+        Index("ix_findings_company_dept_status", "company_id", "department_id", "status"),
         Index("ix_findings_sla", "company_id", "target_sla_date"),
     )
 
@@ -73,6 +74,7 @@ class Finding(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="Open")
     target_sla_date: Mapped[date] = mapped_column(Date, nullable=False)
     management_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     signed_off_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     audit = relationship("Audit")
@@ -268,6 +270,7 @@ class Evidence(TimestampMixin, Base):
             name="ck_evidence_status",
         ),
         Index("ix_evidence_audit_finding", "company_id", "audit_id", "finding_id"),
+        Index("ix_evidence_company_status", "company_id", "verification_status"),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -310,4 +313,35 @@ class Evidence(TimestampMixin, Base):
     finding = relationship("Finding")
     uploaded_by = relationship("User", foreign_keys=[uploaded_by_user_id])
     reviewed_by = relationship("User", foreign_keys=[reviewed_by_user_id])
+
+
+class DistributionRule(TimestampMixin, Base):
+    __tablename__ = "distribution_rules"
+    __table_args__ = (
+        CheckConstraint(
+            "export_format IN ('pdf', 'xlsx', 'csv')",
+            name="ck_distribution_rules_format",
+        ),
+        Index("ix_distribution_rules_company", "company_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4, server_default=text("gen_random_uuid()")
+    )
+    company_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    schedule_label: Mapped[str] = mapped_column(String(120), nullable=False)
+    recipients: Mapped[str] = mapped_column(String(255), nullable=False)
+    report_suite_id: Mapped[str] = mapped_column(String(64), nullable=False, default="rep-board")
+    export_format: Mapped[str] = mapped_column(String(16), nullable=False, default="pdf")
+    icon: Mapped[str] = mapped_column(String(16), nullable=False, default="calendar")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_by = relationship("User", foreign_keys=[created_by_user_id])
 

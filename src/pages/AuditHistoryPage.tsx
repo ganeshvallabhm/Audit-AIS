@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertCircle, ChevronLeft, ChevronRight, Download, ShieldCheck } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Loader2,
+  ShieldAlert,
+  ShieldCheck,
+} from 'lucide-react';
 import { AuditWorkspaceNav } from '../components/layout/AuditWorkspaceNav';
 import { EmptyState } from '../components/ui/EmptyState';
 import { FilterToolbar } from '../components/ui/FilterToolbar';
@@ -8,7 +17,7 @@ import { StatusBadge } from '../components/ui/StatusBadge';
 import { useAuth } from '../context/AuthContext';
 import { ApiError, apiClient } from '../services/apiClient';
 import { auditService } from '../services/auditService';
-import { AuditHistoryOut, PaginatedResponse } from '../types/api';
+import { AuditHistoryOut, AuditHistoryVerifyOut, PaginatedResponse } from '../types/api';
 
 interface AuditHistoryPageProps {
   onNotify: (msg: string) => void;
@@ -24,6 +33,7 @@ interface UnifiedHistoryRow {
   module: string;
   action: string;
   entityRef: string;
+  prevHash: string | null;
   hash: string;
 }
 
@@ -33,6 +43,8 @@ export const AuditHistoryPage: React.FC<AuditHistoryPageProps> = ({ onNotify }) 
   const [totalApiCount, setTotalApiCount] = useState(0);
   const [loading, setLoading] = useState(mode === 'api');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<AuditHistoryVerifyOut | null>(null);
 
   const demoLogs = useMemo(() => auditService.getHistoryLog(), []);
 
@@ -66,6 +78,27 @@ export const AuditHistoryPage: React.FC<AuditHistoryPageProps> = ({ onNotify }) 
     }
   }, [mode, page, categoryFilter, query]);
 
+  const handleVerifyChain = async () => {
+    if (mode !== 'api') return;
+    setVerifying(true);
+    setErrorMsg(null);
+    try {
+      const res = await apiClient.get<AuditHistoryVerifyOut>('/history/verify');
+      setVerifyResult(res);
+      onNotify(
+        res.valid
+          ? `Cryptographic chain verified: ${res.checked_events}/${res.total_events} events intact.`
+          : `Chain verification flagged ${res.broken_event_ids.length} broken link(s).`
+      );
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.detail : 'Failed to verify audit history hash chain.';
+      setErrorMsg(msg);
+      onNotify(msg);
+    } finally {
+      setVerifying(false);
+    }
+  };
+
   useEffect(() => {
     void fetchHistory();
   }, [fetchHistory]);
@@ -82,6 +115,7 @@ export const AuditHistoryPage: React.FC<AuditHistoryPageProps> = ({ onNotify }) 
         module: l.module,
         action: l.action,
         entityRef: l.entity_ref,
+        prevHash: l.prev_event_sha256 ?? null,
         hash: l.event_sha256,
       }));
     }
@@ -107,6 +141,7 @@ export const AuditHistoryPage: React.FC<AuditHistoryPageProps> = ({ onNotify }) 
         module: l.module,
         action: l.action,
         entityRef: l.entityRef,
+        prevHash: null,
         hash: l.hash,
       }));
   }, [mode, apiLogs, demoLogs, query, categoryFilter]);
@@ -175,10 +210,26 @@ export const AuditHistoryPage: React.FC<AuditHistoryPageProps> = ({ onNotify }) 
           setPage(1);
         }}
         rightActions={
-          <StatusBadge tone="secondary">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>SHA-256 Event Chain Verified</span>
-          </StatusBadge>
+          mode === 'api' ? (
+            <button
+              type="button"
+              disabled={verifying}
+              onClick={() => void handleVerifyChain()}
+              className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-secondary-fixed text-on-secondary-fixed hover:bg-primary-fixed disabled:opacity-50 text-label-md font-semibold transition-colors"
+            >
+              {verifying ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <ShieldCheck className="w-4 h-4 text-secondary" />
+              )}
+              <span>{verifying ? 'Verifying Chain...' : 'Verify Chain Integrity'}</span>
+            </button>
+          ) : (
+            <StatusBadge tone="neutral">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Demo Hash Snapshot</span>
+            </StatusBadge>
+          )
         }
       >
         <select
@@ -199,6 +250,55 @@ export const AuditHistoryPage: React.FC<AuditHistoryPageProps> = ({ onNotify }) 
           <option value="Auth">Authentication</option>
         </select>
       </FilterToolbar>
+
+      {verifyResult && (
+        <div
+          className={`p-5 rounded-xl border flex flex-col gap-3 ${
+            verifyResult.valid
+              ? 'bg-surface-container-low/80 border-secondary/35'
+              : 'bg-error-container/45 border-error/40'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              {verifyResult.valid ? (
+                <CheckCircle2 className="w-5 h-5 text-secondary shrink-0" />
+              ) : (
+                <ShieldAlert className="w-5 h-5 text-error shrink-0" />
+              )}
+              <span
+                className={`text-headline-sm font-bold ${
+                  verifyResult.valid ? 'text-primary' : 'text-error'
+                }`}
+              >
+                {verifyResult.valid
+                  ? 'Cryptographic SHA-256 Hash Chain Verified'
+                  : 'Hash Chain Integrity Mismatch Detected'}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 font-mono text-label-sm">
+              <StatusBadge tone={verifyResult.valid ? 'success' : 'danger'}>
+                {verifyResult.checked_events} / {verifyResult.total_events} Events Checked
+              </StatusBadge>
+              <StatusBadge tone={verifyResult.genesis_ok ? 'secondary' : 'danger'}>
+                {verifyResult.genesis_ok ? 'Genesis Anchored' : 'Genesis Invalid'}
+              </StatusBadge>
+            </div>
+          </div>
+          <p className="text-body-sm text-on-surface-variant">{verifyResult.verification_note}</p>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-label-sm font-mono text-outline pt-1 border-t border-border-hairline/60">
+            <span>
+              Head Digest: {verifyResult.latest_event_sha256 ? `${verifyResult.latest_event_sha256.slice(0, 24)}...` : 'N/A'}
+            </span>
+            <span>Verified: {new Date(verifyResult.verified_at).toLocaleString()}</span>
+          </div>
+          {verifyResult.broken_event_ids.length > 0 && (
+            <div className="text-label-sm font-mono text-error">
+              Broken Event IDs: {verifyResult.broken_event_ids.join(', ')}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="bg-surface-container-lowest rounded-xl border border-border-hairline/80 shadow-exec-sm overflow-hidden">
         {mode === 'api' && loading && rows.length === 0 ? (
@@ -251,10 +351,15 @@ export const AuditHistoryPage: React.FC<AuditHistoryPageProps> = ({ onNotify }) 
                       {entry.entityRef}
                     </td>
                     <td
-                      title={entry.hash}
+                      title={`Event: ${entry.hash}${entry.prevHash ? `\nPrev: ${entry.prevHash}` : '\nPrev: GENESIS'}`}
                       className="py-4 px-6 font-mono text-label-sm text-outline whitespace-nowrap"
                     >
-                      {entry.hash.length > 20 ? `${entry.hash.slice(0, 18)}...` : entry.hash}
+                      <div className="text-on-surface">
+                        {entry.hash.length > 20 ? `${entry.hash.slice(0, 18)}...` : entry.hash}
+                      </div>
+                      <div className="text-[11px] text-outline mt-0.5">
+                        Prev: {entry.prevHash ? `${entry.prevHash.slice(0, 12)}...` : 'GENESIS'}
+                      </div>
                     </td>
                   </tr>
                 ))}

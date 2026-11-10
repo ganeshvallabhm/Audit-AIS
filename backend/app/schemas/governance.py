@@ -131,6 +131,7 @@ class FindingOut(ORMBaseModel):
     is_overdue: bool
     progress_percent: int
     management_response: str | None = None
+    rejection_reason: str | None = None
     signed_off_at: datetime | None = None
     recommendations: list[RecommendationOut] = Field(default_factory=list)
     corrective_actions: list[CorrectiveActionOut] = Field(default_factory=list)
@@ -164,6 +165,7 @@ class FindingUpdate(BaseModel):
     owner_user_id: UUID | None = None
     target_sla_date: date | None = None
     management_response: str | None = None
+    rejection_reason: str | None = None
     sign_off: bool | None = None
 
 
@@ -277,4 +279,51 @@ class EvidenceOut(ORMBaseModel):
 class EvidenceVerifyRequest(BaseModel):
     verification_status: EvidenceStatusLiteral
     verify_file_checksum: bool = True
+
+
+class EvidenceUpdate(BaseModel):
+    audit_id: UUID | None = None
+    finding_id: UUID | None = None
+    corrective_action_id: UUID | None = None
+    checklist_item_id: UUID | None = None
+    tag: str | None = Field(default=None, max_length=80)
+
+
+class RiskEscalateRequest(BaseModel):
+    escalation_target: str | None = Field(default=None, max_length=120)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class DistributionRuleOut(ORMBaseModel):
+    id: UUID
+    company_id: UUID
+    name: str
+    schedule_label: str
+    recipients: str
+    report_suite_id: str
+    export_format: Literal["pdf", "xlsx", "csv"]
+    icon: str
+    is_active: bool
+    last_run_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DistributionRuleCreate(BaseModel):
+    name: str = Field(..., min_length=3, max_length=160)
+    schedule_label: str = Field(..., min_length=3, max_length=120)
+    recipients: str = Field(..., min_length=3, max_length=255)
+    report_suite_id: str = Field(default="rep-board", min_length=2, max_length=64)
+    export_format: Literal["pdf", "xlsx", "csv"] = "pdf"
+    icon: str = Field(default="calendar", max_length=16)
+    is_active: bool = True
+
+
+class DistributionRuleUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=3, max_length=160)
+    schedule_label: str | None = Field(default=None, min_length=3, max_length=120)
+    recipients: str | None = Field(default=None, min_length=3, max_length=255)
+    report_suite_id: str | None = Field(default=None, min_length=2, max_length=64)
+    export_format: Literal["pdf", "xlsx", "csv"] | None = None
+    is_active: bool | None = None
 

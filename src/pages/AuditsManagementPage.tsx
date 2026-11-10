@@ -11,9 +11,12 @@ import {
   Columns3,
   Download,
   Lock,
+  Pencil,
+  Plus,
   PlusCircle,
   RefreshCw,
   ShieldAlert,
+  Trash2,
   Users,
   X,
 } from 'lucide-react';
@@ -30,6 +33,7 @@ import { BadgeTone } from '../styles/designTokens';
 import {
   AuditDomainLiteral,
   AuditOut,
+  AuditScopeOut,
   AuditStageOut,
   AuditStatusLiteral,
   DepartmentOut,
@@ -69,16 +73,19 @@ interface UnifiedEngagementRow {
   title: string;
   domain: AuditDomainLiteral;
   framework: string;
+  departmentId: string;
   businessUnit: string;
   leadAuditor: string;
   leadInitials: string;
   leadRole: string;
   targetDue: string;
+  targetDueRaw: string;
   score: number | null;
   status: string;
   controlsEvaluated: number;
   controlsTotal: number;
   summary: string;
+  scopes: AuditScopeOut[];
   stages: AuditStageOut[];
   allowedNextStatuses: AuditStatusLiteral[];
 }
@@ -127,6 +134,20 @@ export const AuditsManagementPage: React.FC<AuditsManagementPageProps> = ({ doma
   const [transitionAudit, setTransitionAudit] = useState<UnifiedEngagementRow | null>(null);
   const [transitioning, setTransitioning] = useState(false);
 
+  // Edit Audit & Scopes CRUD modal state
+  const [manageAuditId, setManageAuditId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDeptId, setEditDeptId] = useState('');
+  const [editFramework, setEditFramework] = useState('');
+  const [editDueDate, setEditDueDate] = useState('');
+  const [editSummary, setEditSummary] = useState('');
+  const [savingManage, setSavingManage] = useState(false);
+  const [newScopeName, setNewScopeName] = useState('');
+  const [newScopeSystem, setNewScopeSystem] = useState('');
+  const [newScopeClause, setNewScopeClause] = useState('');
+  const [newScopeInScope, setNewScopeInScope] = useState(true);
+  const [scopeSaving, setScopeSaving] = useState(false);
+
   // Modal fields
   const [newAuditTitle, setNewAuditTitle] = useState('');
   const [newAuditDomain, setNewAuditDomain] = useState<AuditDomainLiteral>(domainFilter ?? 'Technology');
@@ -169,15 +190,13 @@ export const AuditsManagementPage: React.FC<AuditsManagementPageProps> = ({ doma
       setApiAudits(auditsRes.items);
       setDepartments(deptsRes);
       setTelemetry(telemRes);
-      if (!newAuditDeptId && deptsRes.length > 0) {
-        setNewAuditDeptId(deptsRes[0].id);
-      }
+      setNewAuditDeptId((prev) => prev || (deptsRes[0]?.id ?? ''));
     } catch (err) {
       setErrorMsg(err instanceof ApiError ? err.detail : 'Failed to load audit engagements.');
     } finally {
       setLoading(false);
     }
-  }, [mode, domainFilter, newAuditDeptId]);
+  }, [mode, domainFilter]);
 
   useEffect(() => {
     void fetchData();
@@ -191,16 +210,19 @@ export const AuditsManagementPage: React.FC<AuditsManagementPageProps> = ({ doma
         title: a.title,
         domain: a.domain,
         framework: a.framework,
+        departmentId: a.department_id,
         businessUnit: a.department_name,
         leadAuditor: a.lead_auditor_name,
         leadInitials: a.lead_auditor_initials,
         leadRole: a.lead_auditor_role,
         targetDue: a.target_due_date || 'TBD',
+        targetDueRaw: a.target_due_date || '',
         score: a.computed_score,
         status: a.status,
         controlsEvaluated: a.controls_evaluated,
         controlsTotal: a.controls_total,
         summary: a.summary || `${a.domain} engagement mapped to ${a.framework}.`,
+        scopes: a.scopes || [],
         stages: a.stages,
         allowedNextStatuses: a.allowed_next_statuses,
       }));
@@ -213,16 +235,19 @@ export const AuditsManagementPage: React.FC<AuditsManagementPageProps> = ({ doma
       title: e.title,
       domain: e.domain,
       framework: e.framework,
+      departmentId: '',
       businessUnit: e.businessUnit,
       leadAuditor: e.leadAuditor,
       leadInitials: e.leadInitials,
       leadRole: e.leadRole,
       targetDue: e.targetDue,
+      targetDueRaw: '',
       score: e.score,
       status: e.status,
       controlsEvaluated: e.controlsEvaluated,
       controlsTotal: e.controlsTotal,
       summary: e.summary,
+      scopes: [],
       stages: e.stages,
       allowedNextStatuses: [],
     }));
@@ -244,6 +269,99 @@ export const AuditsManagementPage: React.FC<AuditsManagementPageProps> = ({ doma
   }, [unifiedRows, searchQuery, statusFilter]);
 
   const featuredAudit = unifiedRows[0] ?? null;
+
+  const manageAudit = useMemo(
+    () => (manageAuditId ? unifiedRows.find((r) => r.id === manageAuditId) ?? null : null),
+    [unifiedRows, manageAuditId]
+  );
+
+  const openManageModal = (row: UnifiedEngagementRow) => {
+    setManageAuditId(row.id);
+    setEditTitle(row.title);
+    setEditDeptId(row.departmentId);
+    setEditFramework(row.framework);
+    setEditDueDate(row.targetDueRaw);
+    setEditSummary(row.summary);
+    setNewScopeName('');
+    setNewScopeSystem('');
+    setNewScopeClause('');
+    setNewScopeInScope(true);
+  };
+
+  const handleSaveAuditDetails = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manageAudit || !canMutate || mode !== 'api') return;
+    setSavingManage(true);
+    try {
+      const updated = await apiClient.put<AuditOut>(`/audits/${manageAudit.id}`, {
+        title: editTitle.trim(),
+        department_id: editDeptId || undefined,
+        framework: editFramework.trim(),
+        target_due_date: editDueDate || null,
+        summary: editSummary.trim() || null,
+      });
+      onNotify(`Updated engagement ${updated.code}: ${updated.title}.`);
+      await fetchData();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to update audit details.');
+    } finally {
+      setSavingManage(false);
+    }
+  };
+
+  const handleAddScope = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manageAudit || !canMutate || mode !== 'api' || !newScopeName.trim() || !newScopeSystem.trim()) return;
+    setScopeSaving(true);
+    try {
+      const created = await apiClient.post<AuditScopeOut>(`/audits/${manageAudit.id}/scopes`, {
+        scope_name: newScopeName.trim(),
+        system_or_process: newScopeSystem.trim(),
+        regulatory_clause: newScopeClause.trim() || null,
+        in_scope: newScopeInScope,
+      });
+      setNewScopeName('');
+      setNewScopeSystem('');
+      setNewScopeClause('');
+      setNewScopeInScope(true);
+      onNotify(`Added scope "${created.scope_name}" to ${manageAudit.code}.`);
+      await fetchData();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to add audit scope.');
+    } finally {
+      setScopeSaving(false);
+    }
+  };
+
+  const handleToggleScope = async (scope: AuditScopeOut) => {
+    if (!manageAudit || !canMutate || mode !== 'api') return;
+    setScopeSaving(true);
+    try {
+      await apiClient.put<AuditScopeOut>(`/audits/${manageAudit.id}/scopes/${scope.id}`, {
+        in_scope: !scope.in_scope,
+      });
+      onNotify(`Updated scope "${scope.scope_name}" (${!scope.in_scope ? 'In Scope' : 'Excluded'}).`);
+      await fetchData();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to update audit scope.');
+    } finally {
+      setScopeSaving(false);
+    }
+  };
+
+  const handleDeleteScope = async (scope: AuditScopeOut) => {
+    if (!manageAudit || !canMutate || mode !== 'api') return;
+    setScopeSaving(true);
+    try {
+      await apiClient.delete(`/audits/${manageAudit.id}/scopes/${scope.id}`);
+      onNotify(`Removed scope "${scope.scope_name}" from ${manageAudit.code}.`);
+      await fetchData();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to remove audit scope.');
+    } finally {
+      setScopeSaving(false);
+    }
+  };
 
   const summaryCounts = useMemo(() => {
     const inFlight = unifiedRows.filter((r) => r.status === 'In Progress').length;
@@ -867,6 +985,16 @@ export const AuditsManagementPage: React.FC<AuditsManagementPageProps> = ({ doma
                       }}
                     >
                       <div className="inline-flex items-center gap-2">
+                        {mode === 'api' && canMutate && (
+                          <button
+                            type="button"
+                            onClick={() => openManageModal(row)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-border-hairline bg-surface-container-lowest text-on-surface-variant hover:text-secondary hover:border-secondary/40 text-label-sm font-semibold transition-colors"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            <span>Edit &amp; Scopes ({row.scopes.length})</span>
+                          </button>
+                        )}
                         {mode === 'api' && row.allowedNextStatuses.length > 0 && canMutate && (
                           <button
                             type="button"
@@ -945,6 +1073,233 @@ export const AuditsManagementPage: React.FC<AuditsManagementPageProps> = ({ doma
                     )}
                   </button>
                 ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Audit & Scopes CRUD Modal */}
+      {manageAudit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="fixed inset-0 bg-primary/40 backdrop-blur-[2px]" onClick={() => setManageAuditId(null)} />
+          <div className="relative w-full max-w-2xl bg-surface-container-lowest rounded-xl border border-border-hairline shadow-exec-lg overflow-hidden z-10 my-auto max-h-[90vh] flex flex-col">
+            <div className="px-6 py-4 bg-surface-container-low border-b border-border-hairline flex items-center justify-between">
+              <div>
+                <span className="font-mono text-label-sm font-bold text-secondary">
+                  {manageAudit.code} • {manageAudit.status}
+                </span>
+                <h2 className="text-headline-lg text-primary font-bold">Edit Engagement &amp; Scopes</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setManageAuditId(null)}
+                className="p-1.5 text-outline hover:text-on-surface rounded-lg"
+                aria-label="Close edit engagement modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-6">
+              <form onSubmit={handleSaveAuditDetails} className="space-y-4">
+                <div>
+                  <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                    Engagement Title
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    minLength={3}
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-md focus:outline-none focus:border-secondary"
+                  />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                      Business Unit
+                    </label>
+                    <select
+                      value={editDeptId}
+                      onChange={(e) => setEditDeptId(e.target.value)}
+                      className="w-full h-10 px-3 rounded-lg border border-border-hairline text-body-sm bg-surface-container-lowest"
+                    >
+                      {departments.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.code} — {d.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                      Target Due Date
+                    </label>
+                    <input
+                      type="date"
+                      value={editDueDate}
+                      onChange={(e) => setEditDueDate(e.target.value)}
+                      className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-sm font-mono"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                    Statutory Framework
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editFramework}
+                    onChange={(e) => setEditFramework(e.target.value)}
+                    className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-md"
+                  />
+                </div>
+                <div>
+                  <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                    Engagement Summary
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={editSummary}
+                    onChange={(e) => setEditSummary(e.target.value)}
+                    className="w-full p-3 rounded-lg border border-border-hairline text-body-sm"
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={savingManage}
+                    className="h-9 px-4 rounded-lg bg-secondary text-on-secondary text-label-md font-semibold hover:bg-secondary-container disabled:opacity-60"
+                  >
+                    {savingManage ? 'Saving Changes...' : 'Save Engagement Details'}
+                  </button>
+                </div>
+              </form>
+
+              <div className="pt-5 border-t border-border-hairline space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-headline-md text-primary font-bold">
+                      Defined Audit Scopes ({manageAudit.scopes.length})
+                    </h3>
+                    <p className="text-body-sm text-on-surface-variant">
+                      Boundary systems, processes, and statutory clauses covered by {manageAudit.code}.
+                    </p>
+                  </div>
+                  {manageAudit.status === 'Closed' && (
+                    <StatusBadge tone="neutral">
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>Closed — Scopes Locked</span>
+                    </StatusBadge>
+                  )}
+                </div>
+
+                {manageAudit.scopes.length === 0 ? (
+                  <div className="p-4 rounded-xl bg-surface-container-low/60 border border-border-hairline text-body-sm text-outline">
+                    No explicit scope items registered yet for this engagement.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {manageAudit.scopes.map((sc) => (
+                      <div
+                        key={sc.id}
+                        className="p-3.5 rounded-xl bg-surface-container-low/70 border border-border-hairline flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-label-lg font-bold text-on-surface">{sc.scope_name}</span>
+                            <StatusBadge tone={sc.in_scope ? 'success' : 'neutral'}>
+                              {sc.in_scope ? 'In Scope' : 'Excluded'}
+                            </StatusBadge>
+                          </div>
+                          <div className="text-body-sm text-on-surface-variant mt-0.5">
+                            {sc.system_or_process}
+                            {sc.regulatory_clause ? ` • Clause: ${sc.regulatory_clause}` : ''}
+                          </div>
+                        </div>
+                        {manageAudit.status !== 'Closed' && (
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              disabled={scopeSaving}
+                              onClick={() => void handleToggleScope(sc)}
+                              className="h-8 px-2.5 rounded-lg border border-border-hairline bg-surface-container-lowest text-label-sm font-semibold hover:border-secondary"
+                            >
+                              {sc.in_scope ? 'Exclude' : 'Include'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={scopeSaving}
+                              onClick={() => void handleDeleteScope(sc)}
+                              aria-label={`Delete scope ${sc.scope_name}`}
+                              className="h-8 px-2.5 rounded-lg border border-error/30 text-error hover:bg-error-container/40 text-label-sm font-semibold inline-flex items-center gap-1"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {manageAudit.status !== 'Closed' && (
+                  <form
+                    onSubmit={handleAddScope}
+                    className="p-4 rounded-xl bg-surface-container-low/60 border border-border-hairline space-y-3"
+                  >
+                    <span className="text-label-md uppercase font-bold text-primary block">Add Scope Boundary</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <input
+                        type="text"
+                        required
+                        minLength={2}
+                        value={newScopeName}
+                        onChange={(e) => setNewScopeName(e.target.value)}
+                        placeholder="Scope name (e.g. Cloud IAM Fed)"
+                        className="h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest text-body-sm"
+                      />
+                      <input
+                        type="text"
+                        required
+                        minLength={2}
+                        value={newScopeSystem}
+                        onChange={(e) => setNewScopeSystem(e.target.value)}
+                        placeholder="System or process (e.g. AWS IAM & Okta)"
+                        className="h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest text-body-sm"
+                      />
+                    </div>
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                      <input
+                        type="text"
+                        value={newScopeClause}
+                        onChange={(e) => setNewScopeClause(e.target.value)}
+                        placeholder="Regulatory clause (optional, e.g. SOC 2 CC6.1)"
+                        className="flex-1 h-9 px-3 rounded-lg border border-border-hairline bg-surface-container-lowest text-body-sm"
+                      />
+                      <label className="inline-flex items-center gap-2 text-body-sm text-on-surface cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={newScopeInScope}
+                          onChange={(e) => setNewScopeInScope(e.target.checked)}
+                          className="rounded text-secondary"
+                        />
+                        <span>In Scope</span>
+                      </label>
+                      <button
+                        type="submit"
+                        disabled={scopeSaving || !newScopeName.trim() || !newScopeSystem.trim()}
+                        className="inline-flex items-center justify-center gap-1.5 h-9 px-3.5 rounded-lg bg-primary-container text-on-primary text-label-md font-semibold disabled:opacity-60"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Add Scope</span>
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
             </div>
           </div>

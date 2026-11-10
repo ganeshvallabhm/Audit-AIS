@@ -21,6 +21,7 @@ class CompanyProfileOut(ORMBaseModel):
     digest_frequency: str
     sla_auto_escalate: bool
     ai_citation_strict: bool
+    sha_lock_enabled: bool = True
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -40,6 +41,7 @@ class CompanyProfileUpdate(BaseModel):
     digest_frequency: str | None = Field(default=None, max_length=64)
     sla_auto_escalate: bool | None = None
     ai_citation_strict: bool | None = None
+    sha_lock_enabled: bool | None = None
 
 
 class DepartmentOut(ORMBaseModel):

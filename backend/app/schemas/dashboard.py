@@ -15,6 +15,7 @@ class PerformanceTrendPoint(BaseModel):
     target: float
     baseline: float
     predicted: float | None = None
+    audited_controls_count: int = 0
 
 
 class ForecastSummary(BaseModel):
@@ -27,6 +28,24 @@ class ForecastSummary(BaseModel):
     predicted_months_to_target: float | None = None
     predicted_days_ahead_or_behind: int
     confidence_label: str
+    data_points_count: int = 0
+    is_sufficient_for_forecast: bool = False
+    methodology_note: str = ""
+
+
+class FrameworkComplianceOut(BaseModel):
+    framework: str
+    controls_total: int
+    controls_evaluated: int
+    score: float
+    status: Literal["Compliant", "Monitor", "Needs Attention", "Not Evaluated"]
+
+
+class EvidenceBreakdownOut(BaseModel):
+    total: int
+    verified: int
+    pending_review: int
+    flagged: int
 
 
 class RiskMatrixCell(BaseModel):
@@ -56,9 +75,11 @@ class DashboardOverviewOut(BaseModel):
     active_audits_count: int
     completed_audits_count: int
     total_audits_count: int
+    audit_completion_rate_pct: float = 0.0
     open_findings_count: int
     critical_findings_count: int
     overdue_findings_count: int
+    overdue_actions_count: int = 0
     critical_high_risks_count: int
     board_risk_threshold: int
     sla_compliance_pct: float
@@ -67,6 +88,11 @@ class DashboardOverviewOut(BaseModel):
     departments: list[DepartmentOut]
     priority_signoffs: list[FindingOut]
     risk_distribution: RiskDistributionOut
+    framework_compliance: list[FrameworkComplianceOut] = Field(default_factory=list)
+    evidence_breakdown: EvidenceBreakdownOut = Field(
+        default_factory=lambda: EvidenceBreakdownOut(total=0, verified=0, pending_review=0, flagged=0)
+    )
+    kpi_methodology: dict[str, str] = Field(default_factory=dict)
 
 
 class NotificationOut(ORMBaseModel):
@@ -98,8 +124,29 @@ class AuditHistoryOut(ORMBaseModel):
     action: str
     changes_json: dict[str, Any] = Field(default_factory=dict)
     ip_address: str | None = None
+    prev_event_sha256: str | None = None
     event_sha256: str
     created_at: datetime
+
+
+class AuditHistoryVerifyOut(BaseModel):
+    valid: bool
+    total_events: int
+    checked_events: int
+    broken_event_ids: list[UUID] = Field(default_factory=list)
+    genesis_ok: bool
+    latest_event_sha256: str | None = None
+    verified_at: datetime
+    verification_note: str
+
+
+class SlaSweepResultOut(BaseModel):
+    notifications_created: int
+    overdue_audits: int
+    overdue_actions: int
+    upcoming_deadlines: int
+    critical_risks: int
+    ran_at: datetime
 
 
 class ReportSuiteOut(BaseModel):
@@ -142,6 +189,12 @@ class AiCitation(BaseModel):
 
 class AiSynthesisResponse(BaseModel):
     answer: str
+    verified_facts: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    provider_status: Literal["unavailable", "configured", "live_llm"] = "unavailable"
+    provider_name: str = "PostgreSQL Telemetry Synthesizer (No External LLM Configured)"
+    provider_message: str = ""
+    scoped_department: str | None = None
     citations: list[AiCitation]
     metrics_snapshot: dict[str, Any]
     generated_at: datetime

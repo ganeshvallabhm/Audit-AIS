@@ -17,9 +17,12 @@ import {
   ChevronDown,
   ChevronUp,
   Download,
+  Filter,
+  Info,
   Lock,
   Plus,
   RefreshCw,
+  ShieldCheck,
   SlidersHorizontal,
   TrendingUp,
 } from 'lucide-react';
@@ -32,7 +35,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNotifications } from '../context/NotificationContext';
 import { ApiError, apiClient } from '../services/apiClient';
 import { auditService } from '../services/auditService';
-import { DashboardOverviewOut } from '../types/api';
+import { DashboardOverviewOut, DepartmentOut } from '../types/api';
 import { PrioritySignoffFinding } from '../types/audit';
 
 interface ExecutiveOverviewPageProps {
@@ -58,9 +61,16 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
   const { mode, hasRole } = useAuth();
   const { refresh: refreshNotifications } = useNotifications();
   const [period, setPeriod] = useState('Q4 2025 (Current)');
+  const [departmentFilter, setDepartmentFilter] = useState('');
+  const [domainFilter, setDomainFilter] = useState('');
+  const [auditStatusFilter, setAuditStatusFilter] = useState('');
+  const [riskSeverityFilter, setRiskSeverityFilter] = useState('');
+  const [deptOptions, setDeptOptions] = useState<DepartmentOut[]>([]);
+
   const [pendingOnly, setPendingOnly] = useState(false);
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [showModelDetails, setShowModelDetails] = useState(false);
+  const [showMethodology, setShowMethodology] = useState(false);
 
   // API state
   const [dashboard, setDashboard] = useState<DashboardOverviewOut | null>(null);
@@ -76,6 +86,22 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
   const canSignOff = hasRole('Admin', 'Management');
   const canCreateAudit = hasRole('Admin', 'Auditor');
 
+  useEffect(() => {
+    if (mode !== 'api') return;
+    let active = true;
+    apiClient
+      .get<DepartmentOut[]>('/departments')
+      .then((rows) => {
+        if (active) setDeptOptions(rows);
+      })
+      .catch(() => {
+        // Fallback options arrive inside dashboard payload
+      });
+    return () => {
+      active = false;
+    };
+  }, [mode]);
+
   const fetchDashboard = useCallback(async () => {
     if (mode !== 'api') {
       setLoading(false);
@@ -84,16 +110,21 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
     setLoading(true);
     setErrorMsg(null);
     try {
-      const data = await apiClient.get<DashboardOverviewOut>(
-        `/dashboard?period=${encodeURIComponent(period)}`
-      );
+      const params = new URLSearchParams();
+      params.set('period', period);
+      if (departmentFilter) params.set('department_id', departmentFilter);
+      if (domainFilter) params.set('domain', domainFilter);
+      if (auditStatusFilter) params.set('audit_status', auditStatusFilter);
+      if (riskSeverityFilter) params.set('risk_severity', riskSeverityFilter);
+
+      const data = await apiClient.get<DashboardOverviewOut>(`/dashboard?${params.toString()}`);
       setDashboard(data);
     } catch (err) {
       setErrorMsg(err instanceof ApiError ? err.detail : 'Failed to load executive analytics.');
     } finally {
       setLoading(false);
     }
-  }, [mode, period]);
+  }, [mode, period, departmentFilter, domainFilter, auditStatusFilter, riskSeverityFilter]);
 
   useEffect(() => {
     void fetchDashboard();
@@ -113,16 +144,18 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
   const minFloor = dashboard?.minimum_floor ?? 80;
 
   const topDepartments = useMemo(() => {
-    if (mode === 'api' && dashboard) {
+    if (mode === 'api') {
+      if (!dashboard) return [];
       return dashboard.departments.slice(0, 4).map((d) => ({
         id: d.id,
         name: d.name,
         score: d.score ?? 0,
+        hasScore: d.score !== null && d.score !== undefined,
         attentionArea: d.attention_area,
         note: d.attention_note,
       }));
     }
-    return demoTopDepartments;
+    return demoTopDepartments.map((d) => ({ ...d, hasScore: true }));
   }, [mode, dashboard, demoTopDepartments]);
 
   const signoffRows: UnifiedSignoffRow[] = useMemo(() => {
@@ -242,16 +275,45 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
     );
   }
 
+  if (mode === 'api' && !loading && !dashboard) {
+    return (
+      <div className="flex flex-col gap-8 w-full">
+        <PageHeader
+          eyebrow="Fiduciary Governance & Oversight"
+          title="Executive Overview"
+          description="Unable to load live executive telemetry from PostgreSQL."
+        />
+        <EmptyState
+          icon={<AlertCircle className="w-7 h-7 text-error" />}
+          title="Telemetry Unavailable"
+          description={errorMsg || 'Failed to retrieve dashboard telemetry from the API server.'}
+          actionLabel="Retry Connection"
+          onAction={() => void fetchDashboard()}
+        />
+      </div>
+    );
+  }
+
+  const hasActiveFilters = Boolean(
+    departmentFilter || domainFilter || auditStatusFilter || riskSeverityFilter
+  );
+
   const compositeScore = dashboard ? dashboard.composite_score : 82;
   const criticalHighRisks = dashboard ? dashboard.critical_high_risks_count : 3;
   const boardCap = dashboard ? dashboard.board_risk_threshold : 5;
   const totalAudits = dashboard ? dashboard.total_audits_count : 7;
   const activeAudits = dashboard ? dashboard.active_audits_count : 2;
   const completedAudits = dashboard ? dashboard.completed_audits_count : 5;
+  const auditCompletionRate =
+    dashboard?.audit_completion_rate_pct ??
+    (totalAudits > 0 ? Math.round((completedAudits / totalAudits) * 100) : 0);
   const slaVelocity = dashboard ? dashboard.sla_compliance_pct : 91.4;
   const openFindingsCount = dashboard ? dashboard.open_findings_count : 18;
   const overdueCount = dashboard ? dashboard.overdue_findings_count : 0;
+  const overdueActionsCount = dashboard?.overdue_actions_count ?? 0;
   const forecast = dashboard?.forecast;
+  const forecastSufficient =
+    mode === 'demo' ? true : Boolean(forecast?.is_sufficient_for_forecast);
 
   return (
     <div className="flex flex-col gap-8 w-full">
@@ -321,6 +383,93 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
         </div>
       )}
 
+      {/* Interactive Analytics Filter Bar */}
+      {mode === 'api' && (
+        <section
+          aria-label="Analytics Filters"
+          className="bg-surface-container-lowest rounded-xl px-4 py-3 border border-border-hairline/80 shadow-exec-sm flex flex-wrap items-center justify-between gap-3"
+        >
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span className="inline-flex items-center gap-1.5 text-label-sm uppercase tracking-wider text-outline font-semibold mr-1">
+              <Filter className="w-3.5 h-3.5 text-secondary" />
+              Slice Telemetry
+            </span>
+            <select
+              aria-label="Filter by Department"
+              value={departmentFilter}
+              onChange={(e) => setDepartmentFilter(e.target.value)}
+              className="h-9 px-3 rounded-lg bg-surface-container-low/70 border border-border-hairline text-label-md text-on-surface focus:outline-none focus:border-secondary"
+            >
+              <option value="">All Departments</option>
+              {(deptOptions.length > 0 ? deptOptions : dashboard?.departments || []).map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.code} — {d.name}
+                </option>
+              ))}
+            </select>
+
+            <select
+              aria-label="Filter by Domain"
+              value={domainFilter}
+              onChange={(e) => setDomainFilter(e.target.value)}
+              className="h-9 px-3 rounded-lg bg-surface-container-low/70 border border-border-hairline text-label-md text-on-surface focus:outline-none focus:border-secondary"
+            >
+              <option value="">All Domains</option>
+              <option value="Technology">Technology</option>
+              <option value="Financial">Financial</option>
+              <option value="HR">HR</option>
+              <option value="Project">Project</option>
+              <option value="Customer">Customer</option>
+              <option value="Operations">Operations</option>
+              <option value="Compliance">Compliance</option>
+            </select>
+
+            <select
+              aria-label="Filter by Audit Status"
+              value={auditStatusFilter}
+              onChange={(e) => setAuditStatusFilter(e.target.value)}
+              className="h-9 px-3 rounded-lg bg-surface-container-low/70 border border-border-hairline text-label-md text-on-surface focus:outline-none focus:border-secondary"
+            >
+              <option value="">All Audit States</option>
+              <option value="Scheduled">Scheduled</option>
+              <option value="In Progress">In Progress</option>
+              <option value="Review">Review</option>
+              <option value="Action Required">Action Required</option>
+              <option value="Verification">Verification</option>
+              <option value="Closed">Closed</option>
+            </select>
+
+            <select
+              aria-label="Filter by Risk Severity"
+              value={riskSeverityFilter}
+              onChange={(e) => setRiskSeverityFilter(e.target.value)}
+              className="h-9 px-3 rounded-lg bg-surface-container-low/70 border border-border-hairline text-label-md text-on-surface focus:outline-none focus:border-secondary"
+            >
+              <option value="">All Risk Severities</option>
+              <option value="Critical">Critical</option>
+              <option value="High">High</option>
+              <option value="Medium">Medium</option>
+              <option value="Low">Low</option>
+            </select>
+          </div>
+
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={() => {
+                setDepartmentFilter('');
+                setDomainFilter('');
+                setAuditStatusFilter('');
+                setRiskSeverityFilter('');
+              }}
+              className="h-8 px-3 rounded-lg bg-surface-container-low border border-border-hairline text-label-md text-secondary font-semibold hover:bg-secondary-fixed transition-colors"
+            >
+              Reset Filters
+            </button>
+          )}
+        </section>
+      )}
+
       {/* Primary KPI Strip (4 Balanced Cards) */}
       <section aria-label="Executive Key Metrics" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
         <KpiCard
@@ -328,7 +477,13 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
           badgeText={compositeScore >= minFloor ? 'Compliant' : 'Attention'}
           badgeTone={compositeScore >= minFloor ? 'secondary' : 'danger'}
           value={`${compositeScore.toFixed(1)}%`}
-          delta={forecast ? `${forecast.slope_per_month >= 0 ? '+' : ''}${forecast.slope_per_month.toFixed(2)}%/mo` : '+6.4%'}
+          delta={
+            mode === 'api' && !forecastSufficient
+              ? 'Baseline'
+              : forecast
+                ? `${forecast.slope_per_month >= 0 ? '+' : ''}${forecast.slope_per_month.toFixed(2)}%/mo`
+                : '+6.4%'
+          }
           footerLeft={`Min floor ${minFloor.toFixed(1)}% (Target ${targetThreshold.toFixed(1)}%)`}
           progress={compositeScore}
         />
@@ -350,7 +505,7 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
 
         <KpiCard
           eyebrow="Audit Engagements"
-          badgeText="FY25 Cycle"
+          badgeText={`${auditCompletionRate.toFixed(0)}% Closed`}
           badgeTone="info"
           value={String(totalAudits)}
           suffix={<span className="text-label-md text-outline font-medium">Programs</span>}
@@ -363,17 +518,21 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
               <span>{completedAudits} Closed</span>
             </span>
           }
-          progress={totalAudits > 0 ? Math.round((completedAudits / totalAudits) * 100) : 0}
+          progress={Math.round(auditCompletionRate)}
           onClick={() => navigate('/audits')}
         />
 
         <KpiCard
           eyebrow="Remediation Velocity"
           badgeText="SLA Verified"
-          badgeTone={overdueCount === 0 ? 'success' : 'warning'}
+          badgeTone={overdueCount === 0 && overdueActionsCount === 0 ? 'success' : 'warning'}
           value={`${slaVelocity.toFixed(1)}%`}
-          delta={overdueCount > 0 ? `${overdueCount} Overdue` : 'On Track'}
-          footerLeft={`${openFindingsCount} open findings across enterprise`}
+          delta={
+            overdueCount > 0 || overdueActionsCount > 0
+              ? `${overdueCount + overdueActionsCount} Overdue`
+              : 'On Track'
+          }
+          footerLeft={`${openFindingsCount} open findings • ${overdueActionsCount} overdue actions`}
           progress={slaVelocity}
           onClick={() => navigate('/findings-and-actions')}
         />
@@ -404,114 +563,137 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
             </div>
 
             <div className="w-full h-72 mt-2">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={trendData} margin={{ top: 16, right: 20, left: -12, bottom: 4 }}>
-                  <defs>
-                    <linearGradient id="auditPerfGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#0051d5" stopOpacity={0.14} />
-                      <stop offset="100%" stopColor="#0051d5" stopOpacity={0.0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="#dce9ff" strokeDasharray="4 4" vertical={false} />
-                  <XAxis
-                    dataKey="month"
-                    axisLine={{ stroke: '#dce9ff' }}
-                    tickLine={false}
-                    tick={{ fill: '#44474d', fontSize: 12, fontFamily: 'JetBrains Mono' }}
-                  />
-                  <YAxis
-                    domain={[55, 92]}
-                    ticks={[55, 65, 75, 85]}
-                    tickFormatter={(v) => `${v}%`}
-                    axisLine={false}
-                    tickLine={false}
-                    tick={{ fill: '#696c74', fontSize: 11, fontFamily: 'JetBrains Mono' }}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#ffffff',
-                      borderColor: '#d9e2f0',
-                      borderRadius: '10px',
-                      fontSize: '13px',
-                      boxShadow: '0 4px 6px -1px rgba(11, 31, 58, 0.08)',
-                    }}
-                    formatter={(value: number) => [`${value}%`, 'Composite Score']}
-                  />
-                  <ReferenceLine
-                    y={targetThreshold}
-                    stroke="#0051d5"
-                    strokeDasharray="4 4"
-                    strokeOpacity={0.5}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="actual"
-                    stroke="#0051d5"
-                    isAnimationActive={false}
-                    strokeWidth={3}
-                    fill="url(#auditPerfGradient)"
-                    dot={(props) => {
-                      const { cx, cy, index } = props;
-                      if (cx == null || cy == null) return <g key={index} />;
-                      const isLast = index === trendData.length - 1;
-                      if (isLast) {
+              {trendData.length === 0 ? (
+                <div className="h-full rounded-xl bg-surface-container-low/60 border border-border-hairline flex flex-col items-center justify-center p-6 text-center">
+                  <Info className="w-6 h-6 text-secondary mb-2" />
+                  <p className="text-headline-sm text-primary">No control-testing time series for this filter slice</p>
+                  <p className="text-body-sm text-on-surface-variant mt-1 max-w-md">
+                    Complete checklist assessments in this scope to record genuine chronological audit scores.
+                  </p>
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={trendData} margin={{ top: 16, right: 20, left: -12, bottom: 4 }}>
+                    <defs>
+                      <linearGradient id="auditPerfGradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#0051d5" stopOpacity={0.14} />
+                        <stop offset="100%" stopColor="#0051d5" stopOpacity={0.0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="#dce9ff" strokeDasharray="4 4" vertical={false} />
+                    <XAxis
+                      dataKey="month"
+                      axisLine={{ stroke: '#dce9ff' }}
+                      tickLine={false}
+                      tick={{ fill: '#44474d', fontSize: 12, fontFamily: 'JetBrains Mono' }}
+                    />
+                    <YAxis
+                      domain={[55, 100]}
+                      ticks={[55, 65, 75, 85, 95]}
+                      tickFormatter={(v) => `${v}%`}
+                      axisLine={false}
+                      tickLine={false}
+                      tick={{ fill: '#696c74', fontSize: 11, fontFamily: 'JetBrains Mono' }}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#ffffff',
+                        borderColor: '#d9e2f0',
+                        borderRadius: '10px',
+                        fontSize: '13px',
+                        boxShadow: '0 4px 6px -1px rgba(11, 31, 58, 0.08)',
+                      }}
+                      formatter={(value: number) => [`${value}%`, 'Composite Score']}
+                    />
+                    <ReferenceLine
+                      y={targetThreshold}
+                      stroke="#0051d5"
+                      strokeDasharray="4 4"
+                      strokeOpacity={0.5}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="actual"
+                      stroke="#0051d5"
+                      isAnimationActive={false}
+                      strokeWidth={3}
+                      fill="url(#auditPerfGradient)"
+                      dot={(props) => {
+                        const { cx, cy, index } = props;
+                        if (cx == null || cy == null) return <g key={index} />;
+                        const isLast = index === trendData.length - 1;
+                        if (isLast) {
+                          return (
+                            <circle
+                              key={index}
+                              cx={cx}
+                              cy={cy}
+                              r={5.5}
+                              fill="#0051d5"
+                              stroke="#ffffff"
+                              strokeWidth={2}
+                            />
+                          );
+                        }
                         return (
                           <circle
                             key={index}
                             cx={cx}
                             cy={cy}
-                            r={5.5}
-                            fill="#0051d5"
-                            stroke="#ffffff"
+                            r={4}
+                            fill="#ffffff"
+                            stroke="#0051d5"
                             strokeWidth={2}
                           />
                         );
-                      }
-                      return (
-                        <circle
-                          key={index}
-                          cx={cx}
-                          cy={cy}
-                          r={4}
-                          fill="#ffffff"
-                          stroke="#0051d5"
-                          strokeWidth={2}
-                        />
-                      );
-                    }}
-                    activeDot={{ r: 6, fill: '#0051d5', stroke: '#ffffff', strokeWidth: 2 }}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
+                      }}
+                      activeDot={{ r: 6, fill: '#0051d5', stroke: '#ffffff', strokeWidth: 2 }}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </div>
 
           <div className="mt-4 pt-4 border-t border-surface-container flex flex-col gap-3">
-            <div className="bg-surface-container-low/70 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <TrendingUp className="w-4 h-4 text-secondary shrink-0" />
-                <span className="text-body-sm text-on-surface font-medium">
-                  {forecast
-                    ? forecast.predicted_days_ahead_or_behind >= 0
-                      ? `Target convergence predicted ${forecast.predicted_days_ahead_or_behind} days ahead (${forecast.confidence_label}).`
-                      : `Target convergence projected ${Math.abs(forecast.predicted_days_ahead_or_behind)} days behind schedule (${forecast.confidence_label}).`
-                    : 'Target convergence predicted 14 days ahead of Q4 schedule.'}
-                </span>
+            {mode === 'api' && forecast && !forecastSufficient ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-start gap-2.5 text-body-sm text-amber-900">
+                <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold">Insufficient historical data for regression forecast: </span>
+                  <span>
+                    {forecast.methodology_note ||
+                      `${forecast.data_points_count ?? trendData.length} monthly observation(s) available; minimum 3 chronological months required for Scikit-learn trend convergence.`}
+                  </span>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowModelDetails((prev) => !prev)}
-                className="text-label-md text-secondary hover:underline shrink-0"
-              >
-                {showModelDetails ? 'Hide Parameters' : 'Model Parameters'}
-              </button>
-            </div>
+            ) : (
+              <div className="bg-surface-container-low/70 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <TrendingUp className="w-4 h-4 text-secondary shrink-0" />
+                  <span className="text-body-sm text-on-surface font-medium">
+                    {forecast
+                      ? forecast.predicted_days_ahead_or_behind >= 0
+                        ? `Target convergence predicted ${forecast.predicted_days_ahead_or_behind} days ahead (${forecast.confidence_label}).`
+                        : `Target convergence projected ${Math.abs(forecast.predicted_days_ahead_or_behind)} days behind schedule (${forecast.confidence_label}).`
+                      : 'Target convergence predicted 14 days ahead of Q4 schedule.'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowModelDetails((prev) => !prev)}
+                  className="text-label-md text-secondary hover:underline shrink-0"
+                >
+                  {showModelDetails ? 'Hide Parameters' : 'Model Parameters'}
+                </button>
+              </div>
+            )}
 
-            {showModelDetails && (
+            {showModelDetails && forecastSufficient && (
               <div className="px-4 py-3 rounded-lg bg-surface-container-low border border-border-hairline text-body-sm text-on-surface-variant flex flex-wrap items-center justify-between gap-2">
                 <span>
                   {forecast
-                    ? `Scikit-learn LinearRegression (slope ${forecast.slope_per_month >= 0 ? '+' : ''}${forecast.slope_per_month.toFixed(2)}%/mo, next month proj. ${forecast.projected_next_month.toFixed(1)}%)`
+                    ? `Scikit-learn LinearRegression (n=${forecast.data_points_count ?? trendData.length} mo, slope ${forecast.slope_per_month >= 0 ? '+' : ''}${forecast.slope_per_month.toFixed(2)}%/mo, next month proj. ${forecast.projected_next_month.toFixed(1)}%)`
                     : 'Weighted Control Closure Velocity (alpha=0.42) + Inherent Residual Decay (beta=0.58)'}
                 </span>
                 <span className="font-mono text-label-md text-secondary font-bold">
@@ -555,7 +737,7 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
                         <StatusBadge tone="info">Attention Area</StatusBadge>
                       </div>
                       <span className="font-mono text-data-mono text-secondary font-bold tabular-nums">
-                        {dept.score.toFixed(1)}%
+                        {dept.hasScore ? `${dept.score.toFixed(1)}%` : 'Unrated'}
                       </span>
                     </div>
                     <ProgressBar value={dept.score} heightClass="h-2" trackClass="bg-surface-container-high" />
@@ -572,7 +754,7 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
                         {dept.name}
                       </span>
                       <span className="font-mono text-data-mono text-on-surface font-bold tabular-nums">
-                        {dept.score.toFixed(1)}%
+                        {dept.hasScore ? `${dept.score.toFixed(1)}%` : 'Unrated'}
                       </span>
                     </div>
                     <ProgressBar value={dept.score} heightClass="h-2" trackClass="bg-surface-container-high" />
@@ -586,17 +768,101 @@ export const ExecutiveOverviewPage: React.FC<ExecutiveOverviewPageProps> = ({ on
             <span className="text-body-sm text-outline">Minimum composite floor: {minFloor.toFixed(1)}%</span>
             <button
               type="button"
-              onClick={() =>
-                onNotify('Composite weighting: Control Score 55% • SLA Velocity 25% • Residual Risk 20% (Pandas engine).')
-              }
+              onClick={() => setShowMethodology((prev) => !prev)}
               className="text-label-md text-secondary hover:underline inline-flex items-center gap-1.5"
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
-              <span>Weighting Methodology</span>
+              <span>{showMethodology ? 'Hide Methodology' : 'Weighting & Frameworks'}</span>
             </button>
           </div>
         </div>
       </section>
+
+      {/* Live Framework Compliance & Evidence Breakdown + KPI Methodology (Live API mode) */}
+      {mode === 'api' && dashboard && (showMethodology || (dashboard.framework_compliance && dashboard.framework_compliance.length > 0)) && (
+        <section className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-7 bg-surface-container-lowest rounded-xl p-6 border border-border-hairline/80 shadow-exec-sm">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-headline-md text-primary font-bold">Framework Assurance Posture (Live Checklist Telemetry)</h2>
+                <p className="text-body-sm text-on-surface-variant">
+                  Computed directly from active Checklist controls &amp; AuditResponse evaluations in PostgreSQL
+                </p>
+              </div>
+              <ShieldCheck className="w-5 h-5 text-secondary shrink-0" />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              {(dashboard.framework_compliance || []).slice(0, 4).map((fw) => (
+                <div
+                  key={fw.framework}
+                  className="p-3.5 rounded-xl bg-surface-container-low/70 border border-border-hairline/60 space-y-2"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-label-md font-bold text-primary truncate">{fw.framework}</span>
+                    <StatusBadge
+                      tone={
+                        fw.status === 'Compliant'
+                          ? 'success'
+                          : fw.status === 'Monitor'
+                            ? 'secondary'
+                            : fw.status === 'Needs Attention'
+                              ? 'danger'
+                              : 'neutral'
+                      }
+                    >
+                      {fw.status}
+                    </StatusBadge>
+                  </div>
+                  <ProgressBar value={fw.score} heightClass="h-1.5" trackClass="bg-surface-container-high" />
+                  <div className="flex items-center justify-between text-label-sm text-outline">
+                    <span>
+                      {fw.controls_evaluated}/{fw.controls_total} controls tested
+                    </span>
+                    <span className="font-mono font-bold text-primary">{fw.score.toFixed(1)}%</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="lg:col-span-5 bg-surface-container-lowest rounded-xl p-6 border border-border-hairline/80 shadow-exec-sm flex flex-col justify-between gap-4">
+            <div>
+              <h2 className="text-headline-md text-primary font-bold">Evidence Vault &amp; KPI Methodology</h2>
+              {dashboard.evidence_breakdown && (
+                <div className="grid grid-cols-4 gap-2.5 mt-3">
+                  <div className="p-2.5 rounded-lg bg-surface-container-low text-center">
+                    <div className="font-mono text-headline-sm font-bold text-primary">{dashboard.evidence_breakdown.total}</div>
+                    <div className="text-[11px] text-outline uppercase">Total</div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-emerald-50 text-center">
+                    <div className="font-mono text-headline-sm font-bold text-emerald-700">{dashboard.evidence_breakdown.verified}</div>
+                    <div className="text-[11px] text-emerald-700 uppercase">Verified</div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-amber-50 text-center">
+                    <div className="font-mono text-headline-sm font-bold text-amber-800">{dashboard.evidence_breakdown.pending_review}</div>
+                    <div className="text-[11px] text-amber-800 uppercase">Pending</div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-error-container/60 text-center">
+                    <div className="font-mono text-headline-sm font-bold text-error">{dashboard.evidence_breakdown.flagged}</div>
+                    <div className="text-[11px] text-error uppercase">Flagged</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {showMethodology && dashboard.kpi_methodology && (
+              <div className="space-y-1.5 pt-3 border-t border-surface-container text-body-sm text-on-surface-variant">
+                {Object.entries(dashboard.kpi_methodology).map(([k, desc]) => (
+                  <p key={k}>
+                    <span className="font-mono text-label-sm font-bold text-secondary uppercase">{k.replace(/_/g, ' ')}:</span>{' '}
+                    {desc}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Priority Findings Requiring Governance Sign-off */}
       <section className="bg-surface-container-lowest rounded-xl border border-border-hairline/80 shadow-exec-sm overflow-hidden flex flex-col">

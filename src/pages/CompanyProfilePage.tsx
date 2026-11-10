@@ -13,6 +13,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
+import { EmptyState } from '../components/ui/EmptyState';
 import { PageHeader } from '../components/ui/PageHeader';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { useAuth } from '../context/AuthContext';
@@ -127,9 +128,15 @@ export const CompanyProfilePage: React.FC<CompanyProfilePageProps> = ({ onNotify
     onNotify('Downloaded Audit Charter & Regulatory Mandate CSV digest.');
   };
 
-  const displayExecutiveName = user?.full_name || CURRENT_USER.name;
-  const displayExecutiveRole = user?.job_title || CURRENT_USER.role;
-  const displayCerts = user?.certifications?.length ? user.certifications : CURRENT_USER.certifications;
+  const displayExecutiveName =
+    user?.full_name || (mode === 'demo' ? CURRENT_USER.name : 'Authenticated Principal');
+  const displayExecutiveRole =
+    user?.job_title || user?.role || (mode === 'demo' ? CURRENT_USER.role : 'Governance Role');
+  const displayCerts = user?.certifications?.length
+    ? user.certifications
+    : mode === 'demo'
+      ? CURRENT_USER.certifications
+      : [];
 
   if (mode === 'api' && loading && !company) {
     return (
@@ -143,6 +150,28 @@ export const CompanyProfilePage: React.FC<CompanyProfilePageProps> = ({ onNotify
           description="Loading organization governance profile..."
         />
         <div className="h-72 rounded-xl bg-surface-container-lowest border border-border-hairline animate-pulse" />
+      </div>
+    );
+  }
+
+  if (mode === 'api' && !loading && !company) {
+    return (
+      <div className="flex flex-col gap-8 w-full">
+        <PageHeader
+          breadcrumbs={[
+            { label: 'Enterprise Governance', to: '/dashboard' },
+            { label: 'Company Profile & Charter' },
+          ]}
+          title="Company Profile & Audit Charter"
+          description="Unable to load live organization governance profile."
+        />
+        <EmptyState
+          icon={<AlertCircle className="w-7 h-7 text-error" />}
+          title="Organization Profile Unavailable"
+          description={errorMsg || 'Failed to retrieve company profile from PostgreSQL.'}
+          actionLabel="Retry"
+          onAction={() => void fetchCompany()}
+        />
       </div>
     );
   }
@@ -355,12 +384,17 @@ export const CompanyProfilePage: React.FC<CompanyProfilePageProps> = ({ onNotify
               </div>
 
               <div className="p-4 rounded-xl bg-surface-container-low/80 border border-border-hairline/60">
-                <span className="text-headline-sm font-bold text-primary block mb-1">
-                  3. Cryptographic SHA-256 Evidence Verification
-                </span>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="text-headline-sm font-bold text-primary">
+                    3. Cryptographic SHA-256 Evidence Verification
+                  </span>
+                  <StatusBadge tone={(company?.sha_lock_enabled ?? true) ? 'success' : 'warning'}>
+                    {(company?.sha_lock_enabled ?? true) ? 'SHA Lock Active' : 'Lock Advisory'}
+                  </StatusBadge>
+                </div>
                 <p className="text-body-sm text-on-surface-variant leading-relaxed">
-                  All workpapers and control artifacts are hashed with SHA-256 upon upload, tracked inside an
-                  append-only audit history ledger, and verified on every retrieval.
+                  All workpapers and control artifacts are hashed with SHA-256 upon upload, tracked inside a
+                  hash-chained append-only audit history ledger, and verified on every retrieval.
                 </p>
               </div>
             </div>

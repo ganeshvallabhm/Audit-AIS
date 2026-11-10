@@ -6,6 +6,8 @@ import {
   Bot,
   CheckCircle2,
   FileSearch,
+  Info,
+  Lock,
   Send,
   ShieldAlert,
   Sparkles,
@@ -31,6 +33,12 @@ interface ChatTurn {
   sender: 'assistant' | 'user';
   timestamp: string;
   content: string;
+  verifiedFacts?: string[];
+  recommendations?: string[];
+  providerStatus?: 'unavailable' | 'configured' | 'live_llm';
+  providerName?: string;
+  providerMessage?: string;
+  scopedDepartment?: string | null;
   citations?: { code: string; label: string; link: string }[];
   snapshot?: Record<string, unknown>;
 }
@@ -95,18 +103,47 @@ function generateDeterministicAuditReply(prompt: string): {
 
 export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNotify }) => {
   const { mode, user } = useAuth();
-  const [messages, setMessages] = useState<ChatTurn[]>(DEMO_INITIAL_CONVERSATION);
+  const [messages, setMessages] = useState<ChatTurn[]>(() =>
+    mode === 'api'
+      ? [
+          {
+            id: 'api-loading',
+            sender: 'assistant',
+            timestamp: 'PostgreSQL Grounded',
+            content: 'Synchronizing live PostgreSQL telemetry context for CompanyAudit Intelligence...',
+          },
+        ]
+      : DEMO_INITIAL_CONVERSATION
+  );
   const [input, setInput] = useState('');
   const [selectedDomain, setSelectedDomain] = useState('');
   const [sending, setSending] = useState(false);
 
-  // Live context snapshot
+  // Live context snapshot & provider honesty metadata
   const [dashboard, setDashboard] = useState<DashboardOverviewOut | null>(null);
   const [topFindings, setTopFindings] = useState<FindingOut[]>([]);
   const [topRisks, setTopRisks] = useState<RiskOut[]>([]);
+  const [contextLoading, setContextLoading] = useState(mode === 'api');
+  const [providerInfo, setProviderInfo] = useState<{
+    status: 'unavailable' | 'configured' | 'live_llm';
+    name: string;
+    message: string;
+  }>({
+    status: 'unavailable',
+    name: 'PostgreSQL Telemetry Synthesizer (No External LLM Configured)',
+    message:
+      'External LLM API credentials are not configured in this environment. Responses use deterministic PostgreSQL analytics and regression telemetry only.',
+  });
+  const [scopedDepartment, setScopedDepartment] = useState<string | null>(
+    user?.role === 'Department Head' ? user.department_name || 'Department Scope' : null
+  );
 
   const loadLiveContext = useCallback(async () => {
-    if (mode !== 'api') return;
+    if (mode !== 'api') {
+      setContextLoading(false);
+      return;
+    }
+    setContextLoading(true);
     try {
       const [dashRes, fndRes, rskRes] = await Promise.all([
         apiClient.get<DashboardOverviewOut>('/dashboard'),
@@ -116,12 +153,30 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
       setDashboard(dashRes);
       setTopFindings(fndRes.items);
       setTopRisks(rskRes.items);
+
+      const verifiedFacts = [
+        `Weighted enterprise readiness score: ${dashRes.composite_score}% (target ${dashRes.enterprise_target}%)`,
+        `Active audits: ${dashRes.active_audits_count}/${dashRes.total_audits_count} (${dashRes.completed_audits_count} completed)`,
+        `Open findings: ${dashRes.open_findings_count} (${dashRes.overdue_findings_count} past target SLA date)`,
+        `Enterprise risks tracked: ${dashRes.risk_distribution.total_risks} (${dashRes.critical_high_risks_count} Critical/High)`,
+      ];
+      const recommendations = [
+        dashRes.overdue_findings_count > 0
+          ? `Prioritize ${dashRes.overdue_findings_count} overdue finding(s) before executive sign-off review.`
+          : 'Maintain remediation cadence; all open findings are within SLA deadlines.',
+        dashRes.forecast.is_sufficient_for_forecast === false
+          ? 'Record audit responses across >=3 distinct months to unlock predictive linear trend projection.'
+          : `Monitor Scikit-learn slope (${dashRes.forecast.slope_per_month >= 0 ? '+' : ''}${dashRes.forecast.slope_per_month}%/mo) against target trajectory.`,
+      ];
+
       setMessages([
         {
           id: 'api-init-1',
           sender: 'assistant',
           timestamp: 'PostgreSQL Grounded',
-          content: `CompanyAudit Intelligence Engine connected to ${dashRes.company_name} (${dashRes.fiscal_year}). Live telemetry indexed: ${dashRes.open_findings_count} open findings, ${dashRes.risk_distribution.total_risks} enterprise risks, and ${dashRes.total_audits_count} audit engagements. Weighted compliance readiness is ${dashRes.composite_score}% (target ${dashRes.enterprise_target}%), Scikit-learn forecast slope ${dashRes.forecast.slope_per_month >= 0 ? '+' : ''}${dashRes.forecast.slope_per_month}%/mo.`,
+          content: `CompanyAudit Intelligence Engine connected to ${dashRes.company_name} (${dashRes.fiscal_year}). Ask a governance query to run deterministic PostgreSQL synthesis.`,
+          verifiedFacts,
+          recommendations,
           citations: [
             { code: 'DASHBOARD', label: 'Executive Telemetry', link: '/dashboard' },
             { code: 'REPORTS', label: 'Governance Briefing Suite', link: '/reports' },
@@ -136,7 +191,16 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
         },
       ]);
     } catch {
-      // Leave initial message gracefully if context pre-load fails
+      setMessages([
+        {
+          id: 'api-init-err',
+          sender: 'assistant',
+          timestamp: 'Context Offline',
+          content: 'Unable to preload executive dashboard telemetry snapshot. Submit a query to test /reports/ai-synthesis directly.',
+        },
+      ]);
+    } finally {
+      setContextLoading(false);
     }
   }, [mode]);
 
@@ -182,6 +246,20 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
         prompt: trimmed,
         domain: selectedDomain || null,
       });
+
+      if (res.provider_status || res.provider_name || res.provider_message) {
+        setProviderInfo({
+          status: res.provider_status || 'unavailable',
+          name: res.provider_name || 'PostgreSQL Telemetry Synthesizer',
+          message:
+            res.provider_message ||
+            'Deterministic synthesis computed directly from live PostgreSQL telemetry.',
+        });
+      }
+      if (res.scoped_department !== undefined) {
+        setScopedDepartment(res.scoped_department);
+      }
+
       const botMsg: ChatTurn = {
         id: `a-${Date.now() + 1}`,
         sender: 'assistant',
@@ -190,6 +268,12 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
           minute: '2-digit',
         }),
         content: res.answer,
+        verifiedFacts: res.verified_facts,
+        recommendations: res.recommendations,
+        providerStatus: res.provider_status,
+        providerName: res.provider_name,
+        providerMessage: res.provider_message,
+        scopedDepartment: res.scoped_department,
         citations: res.citations.map((c) => ({
           code: c.entity_ref,
           label: c.label,
@@ -224,7 +308,13 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
         title="AI Audit Assistant"
         description="Query live PostgreSQL audit trails, synthesize control exceptions, and generate assurance narratives grounded in verified evidence."
         actions={
-          <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            {scopedDepartment && (
+              <StatusBadge tone="info">
+                <Lock className="w-3.5 h-3.5" />
+                <span>Department Scope: {scopedDepartment}</span>
+              </StatusBadge>
+            )}
             {mode === 'api' && (
               <select
                 value={selectedDomain}
@@ -240,12 +330,39 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
                 <option value="HR">HR</option>
               </select>
             )}
-            <StatusBadge tone="secondary" dot>
-              {mode === 'api' ? 'PostgreSQL + Scikit-learn Grounded' : 'Offline Demo Preview'}
+            <StatusBadge tone={providerInfo.status === 'live_llm' ? 'success' : 'secondary'} dot>
+              {mode === 'api'
+                ? providerInfo.status === 'live_llm'
+                  ? `Live LLM: ${providerInfo.name}`
+                  : 'Deterministic PostgreSQL Telemetry'
+                : 'Offline Demo Preview'}
             </StatusBadge>
           </div>
         }
       />
+
+      {mode === 'api' && (
+        <div
+          className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-body-sm ${
+            providerInfo.status === 'live_llm'
+              ? 'bg-secondary-fixed/25 border-secondary/30 text-on-surface'
+              : 'bg-surface-container-low border-border-hairline text-on-surface-variant'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            <Info className="w-4 h-4 text-secondary shrink-0 mt-0.5" />
+            <div>
+              <strong className="text-primary">{providerInfo.name}:</strong>{' '}
+              <span>{providerInfo.message}</span>
+            </div>
+          </div>
+          {scopedDepartment && (
+            <span className="font-mono text-label-sm font-semibold text-secondary shrink-0">
+              RBAC Filter: {scopedDepartment}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Context & Prompts Rail */}
@@ -258,25 +375,43 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
               <div className="flex justify-between px-3 py-2.5 rounded-lg bg-surface-container-low">
                 <span className="text-on-surface-variant">Cycle</span>
                 <span className="font-mono font-bold text-on-surface">
-                  {dashboard?.fiscal_year || 'FY 2025 Q4'}
+                  {mode === 'api' ? dashboard?.fiscal_year || (contextLoading ? '...' : '—') : 'FY 2025 Q4'}
                 </span>
               </div>
               <div className="flex justify-between px-3 py-2.5 rounded-lg bg-surface-container-low">
                 <span className="text-on-surface-variant">Open Findings</span>
                 <span className="font-mono font-bold text-error">
-                  {dashboard ? `${dashboard.open_findings_count} Active` : '18 Active'}
+                  {mode === 'api'
+                    ? dashboard
+                      ? `${dashboard.open_findings_count} Active`
+                      : contextLoading
+                        ? '...'
+                        : '—'
+                    : '18 Active'}
                 </span>
               </div>
               <div className="flex justify-between px-3 py-2.5 rounded-lg bg-surface-container-low">
                 <span className="text-on-surface-variant">Risk Register</span>
                 <span className="font-mono font-bold text-secondary">
-                  {dashboard ? `${dashboard.risk_distribution.total_risks} Vectors` : '47 Vectors'}
+                  {mode === 'api'
+                    ? dashboard
+                      ? `${dashboard.risk_distribution.total_risks} Vectors`
+                      : contextLoading
+                        ? '...'
+                        : '—'
+                    : '47 Vectors'}
                 </span>
               </div>
               {dashboard && (
                 <div className="flex justify-between px-3 py-2.5 rounded-lg bg-surface-container-low">
                   <span className="text-on-surface-variant">Composite Score</span>
                   <span className="font-mono font-bold text-primary">{dashboard.composite_score}%</span>
+                </div>
+              )}
+              {scopedDepartment && (
+                <div className="flex justify-between px-3 py-2.5 rounded-lg bg-secondary-fixed/25 border border-secondary/20">
+                  <span className="text-secondary font-semibold">Department</span>
+                  <span className="font-mono font-bold text-primary">{scopedDepartment}</span>
                 </div>
               )}
             </div>
@@ -349,7 +484,39 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
                       : 'bg-surface-container-low/80 text-on-surface border border-border-hairline/70'
                   }`}
                 >
-                  {m.content}
+                  <div>{m.content}</div>
+
+                  {m.verifiedFacts && m.verifiedFacts.length > 0 && (
+                    <div className="mt-3 p-3 rounded-lg bg-surface-container-lowest border border-border-hairline/80 space-y-1.5">
+                      <span className="text-label-sm uppercase tracking-wider font-bold text-primary block">
+                        Verified Database Facts
+                      </span>
+                      <ul className="space-y-1 text-body-sm text-on-surface">
+                        {m.verifiedFacts.map((fact, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-secondary shrink-0 mt-1" />
+                            <span>{fact}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {m.recommendations && m.recommendations.length > 0 && (
+                    <div className="mt-2.5 p-3 rounded-lg bg-secondary-fixed/25 border border-secondary/25 space-y-1.5">
+                      <span className="text-label-sm uppercase tracking-wider font-bold text-secondary block">
+                        Prioritized Governance Recommendations
+                      </span>
+                      <ul className="space-y-1 text-body-sm text-on-surface">
+                        {m.recommendations.map((rec, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <ArrowUpRight className="w-3.5 h-3.5 text-secondary shrink-0 mt-1" />
+                            <span>{rec}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   {m.snapshot && (
                     <div className="flex flex-wrap gap-2 mt-3 pt-2.5 border-t border-border-hairline/60 font-mono text-label-sm text-on-surface-variant">
@@ -420,52 +587,60 @@ export const AiAuditAssistantPage: React.FC<AiAuditAssistantPageProps> = ({ onNo
             <h3 className="text-headline-sm text-primary font-bold">Continuous Control Anomalies</h3>
           </div>
 
-          {mode === 'api' && (topFindings.length > 0 || topRisks.length > 0) ? (
-            <div className="space-y-3 text-body-sm">
-              {topFindings.slice(0, 2).map((f) => (
-                <Link
-                  key={f.id}
-                  to="/findings-and-actions"
-                  className={`block p-3.5 rounded-xl border space-y-1 transition-colors ${
-                    f.is_overdue || f.severity === 'Critical'
-                      ? 'bg-error-container/35 border-error-container hover:bg-error-container/50'
-                      : 'bg-surface-container-low/80 border-border-hairline/70 hover:bg-surface-container'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span
-                      className={`font-mono text-label-sm font-bold ${
-                        f.is_overdue || f.severity === 'Critical' ? 'text-error' : 'text-secondary'
-                      }`}
-                    >
-                      {f.code} • {f.sla_countdown}
-                    </span>
-                    <AlertTriangle
-                      className={`w-4 h-4 ${
-                        f.is_overdue || f.severity === 'Critical' ? 'text-error' : 'text-secondary'
-                      }`}
-                    />
-                  </div>
-                  <p className="text-on-surface font-medium line-clamp-2">{f.title}</p>
-                </Link>
-              ))}
+          {mode === 'api' ? (
+            topFindings.length > 0 || topRisks.length > 0 ? (
+              <div className="space-y-3 text-body-sm">
+                {topFindings.slice(0, 2).map((f) => (
+                  <Link
+                    key={f.id}
+                    to="/findings-and-actions"
+                    className={`block p-3.5 rounded-xl border space-y-1 transition-colors ${
+                      f.is_overdue || f.severity === 'Critical'
+                        ? 'bg-error-container/35 border-error-container hover:bg-error-container/50'
+                        : 'bg-surface-container-low/80 border-border-hairline/70 hover:bg-surface-container'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span
+                        className={`font-mono text-label-sm font-bold ${
+                          f.is_overdue || f.severity === 'Critical' ? 'text-error' : 'text-secondary'
+                        }`}
+                      >
+                        {f.code} • {f.sla_countdown}
+                      </span>
+                      <AlertTriangle
+                        className={`w-4 h-4 ${
+                          f.is_overdue || f.severity === 'Critical' ? 'text-error' : 'text-secondary'
+                        }`}
+                      />
+                    </div>
+                    <p className="text-on-surface font-medium line-clamp-2">{f.title}</p>
+                  </Link>
+                ))}
 
-              {topRisks.slice(0, 1).map((r) => (
-                <Link
-                  key={r.id}
-                  to="/risk-and-compliance"
-                  className="block p-3.5 rounded-xl bg-surface-container-low/80 border border-border-hairline/70 hover:bg-surface-container space-y-1 transition-colors"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-label-sm font-bold text-secondary">
-                      {r.code} • SCORE {r.inherent_score} ({r.severity})
-                    </span>
-                    <ShieldAlert className="w-4 h-4 text-secondary" />
-                  </div>
-                  <p className="text-on-surface font-medium line-clamp-2">{r.title}</p>
-                </Link>
-              ))}
-            </div>
+                {topRisks.slice(0, 1).map((r) => (
+                  <Link
+                    key={r.id}
+                    to="/risk-and-compliance"
+                    className="block p-3.5 rounded-xl bg-surface-container-low/80 border border-border-hairline/70 hover:bg-surface-container space-y-1 transition-colors"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-label-sm font-bold text-secondary">
+                        {r.code} • SCORE {r.inherent_score} ({r.severity})
+                      </span>
+                      <ShieldAlert className="w-4 h-4 text-secondary" />
+                    </div>
+                    <p className="text-on-surface font-medium line-clamp-2">{r.title}</p>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline text-body-sm text-on-surface-variant">
+                {contextLoading
+                  ? 'Scanning PostgreSQL findings and risks...'
+                  : 'No active findings or critical risk anomalies found in current telemetry scope.'}
+              </div>
+            )
           ) : (
             <div className="space-y-3 text-body-sm">
               <div className="p-3.5 rounded-xl bg-error-container/35 border border-error-container space-y-1">

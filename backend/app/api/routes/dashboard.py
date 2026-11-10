@@ -1,7 +1,8 @@
-from datetime import datetime, UTC
+from datetime import UTC, date, datetime
+from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -9,20 +10,22 @@ from app.analytics.forecasting import build_performance_trend_and_forecast
 from app.analytics.reporting import (
     build_report_detail,
     generate_grounded_ai_synthesis,
+    generate_report_export,
     get_report_suites,
 )
 from app.analytics.scoring_analytics import (
     build_company_overview_numbers,
     compute_risk_distribution,
 )
-from app.api.routes.company import serialize_department
-from app.api.routes.governance import serialize_finding
+from app.api.routes.company import serialize_departments
+from app.api.routes.governance import serialize_findings
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_roles
+from app.core.rate_limit import client_rate_key, rate_limiter
 from app.models.audit import Audit, ChecklistItem
 from app.models.core import Company, Department, User
 from app.models.domains import Customer, Employee, FinancialMetric, Project
-from app.models.governance import Evidence, Finding, Risk
+from app.models.governance import DistributionRule, Evidence, Finding, Risk
 from app.models.telemetry import AuditHistory, Notification
 from app.schemas.common import MessageResponse, PaginatedResponse
 from app.schemas.company import DepartmentOut
@@ -30,11 +33,14 @@ from app.schemas.dashboard import (
     AiSynthesisRequest,
     AiSynthesisResponse,
     AuditHistoryOut,
+    AuditHistoryVerifyOut,
     CustomerAssuranceOut,
     DashboardOverviewOut,
     DomainTelemetryOut,
     EmployeeComplianceOut,
+    EvidenceBreakdownOut,
     FinancialMetricOut,
+    FrameworkComplianceOut,
     GlobalSearchResponse,
     NotificationOut,
     ProjectOut,
@@ -43,7 +49,15 @@ from app.schemas.dashboard import (
     ReportSuiteOut,
     RiskDistributionOut,
     SearchResultItem,
+    SlaSweepResultOut,
 )
+from app.schemas.governance import (
+    DistributionRuleCreate,
+    DistributionRuleOut,
+    DistributionRuleUpdate,
+)
+from app.services.audit_history import record_audit_history, verify_company_history_chain
+from app.services.notifications import run_company_sla_sweep
 
 router = APIRouter(tags=["Dashboard, Analytics, Reports & Telemetry"])
 
@@ -51,6 +65,12 @@ router = APIRouter(tags=["Dashboard, Analytics, Reports & Telemetry"])
 @router.get("/dashboard", response_model=DashboardOverviewOut)
 def get_dashboard_overview(
     period: str = Query(default="Q4 2025"),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    department_id: UUID | None = Query(default=None),
+    domain: str | None = Query(default=None),
+    audit_status: str | None = Query(default=None),
+    risk_severity: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DashboardOverviewOut:
@@ -58,25 +78,47 @@ def get_dashboard_overview(
     if company is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found.")
 
-    numbers = build_company_overview_numbers(db, company)
+    numbers = build_company_overview_numbers(
+        db,
+        company,
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+        department_id=department_id,
+        domain=domain,
+        audit_status=audit_status,
+        risk_severity=risk_severity,
+    )
+    d_from, d_to = numbers["date_bounds"]
     trend, forecast = build_performance_trend_and_forecast(
+        db,
+        company.id,
         live_composite_score=numbers["composite_score"],
         enterprise_target=float(company.enterprise_target_score),
         period=period,
+        department_id=department_id,
+        domain=domain,
+        audit_status=audit_status,
+        d_from=d_from,
+        d_to=d_to,
     )
 
-    depts_out = [
-        serialize_department(db, dept, numbers["dept_metrics"].get(dept.id))
-        for dept in numbers["departments"]
-    ]
+    depts_out = serialize_departments(db, numbers["departments"], numbers["dept_metrics"])
 
-    priority_rows = db.scalars(
+    priority_stmt = (
         select(Finding)
         .options(selectinload(Finding.recommendations), selectinload(Finding.corrective_actions))
         .where(Finding.company_id == company.id, Finding.status != "Closed")
-        .order_by(Finding.target_sla_date.asc())
-        .limit(6)
-    ).all()
+    )
+    if department_id is not None:
+        priority_stmt = priority_stmt.where(Finding.department_id == department_id)
+    if numbers["filtered_finding_ids"] or department_id or domain or d_from or d_to:
+        if numbers["filtered_finding_ids"]:
+            priority_stmt = priority_stmt.where(Finding.id.in_(numbers["filtered_finding_ids"]))
+        else:
+            priority_stmt = priority_stmt.where(Finding.id.is_(None))
+
+    priority_rows = list(db.scalars(priority_stmt.order_by(Finding.target_sla_date.asc()).limit(6)).all())
 
     return DashboardOverviewOut(
         company_name=company.legal_name,
@@ -88,17 +130,22 @@ def get_dashboard_overview(
         active_audits_count=numbers["active_audits_count"],
         completed_audits_count=numbers["completed_audits_count"],
         total_audits_count=numbers["total_audits_count"],
+        audit_completion_rate_pct=numbers["audit_completion_rate_pct"],
         open_findings_count=numbers["open_findings_count"],
         critical_findings_count=numbers["critical_findings_count"],
         overdue_findings_count=numbers["overdue_findings_count"],
+        overdue_actions_count=numbers["overdue_actions_count"],
         critical_high_risks_count=numbers["critical_high_risks_count"],
         board_risk_threshold=company.board_risk_threshold,
         sla_compliance_pct=numbers["sla_compliance_pct"],
         performance_trend=trend,  # type: ignore[arg-type]
         forecast=forecast,  # type: ignore[arg-type]
         departments=depts_out,
-        priority_signoffs=[serialize_finding(db, row) for row in priority_rows],
+        priority_signoffs=serialize_findings(db, priority_rows),
         risk_distribution=RiskDistributionOut(**numbers["risk_distribution"]),
+        framework_compliance=[FrameworkComplianceOut(**fw) for fw in numbers["framework_compliance"]],
+        evidence_breakdown=EvidenceBreakdownOut(**numbers["evidence_breakdown"]),
+        kpi_methodology=numbers["kpi_methodology"],
     )
 
 
@@ -111,10 +158,7 @@ def get_department_performance(
     if company is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found.")
     numbers = build_company_overview_numbers(db, company)
-    return [
-        serialize_department(db, dept, numbers["dept_metrics"].get(dept.id))
-        for dept in numbers["departments"]
-    ]
+    return serialize_departments(db, numbers["departments"], numbers["dept_metrics"])
 
 
 @router.get("/dashboard/risk-distribution", response_model=RiskDistributionOut)
@@ -242,7 +286,7 @@ def global_search(
     return GlobalSearchResponse(query=q.strip(), total=len(results), results=results)
 
 
-# ==================== REPORTS & AI ASSISTANT ====================
+# ==================== REPORTS, EXPORTS, DISTRIBUTIONS & AI ASSISTANT ====================
 
 
 @router.get("/reports", response_model=list[ReportSuiteOut])
@@ -252,29 +296,187 @@ def list_reports(
     return [ReportSuiteOut(**s) for s in get_report_suites()]
 
 
+@router.get("/reports/distributions", response_model=list[DistributionRuleOut])
+def list_distribution_rules(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[DistributionRule]:
+    return list(
+        db.scalars(
+            select(DistributionRule)
+            .where(DistributionRule.company_id == current_user.company_id)
+            .order_by(DistributionRule.created_at.desc())
+        ).all()
+    )
+
+
+@router.post("/reports/distributions", response_model=DistributionRuleOut, status_code=status.HTTP_201_CREATED)
+def create_distribution_rule(
+    payload: DistributionRuleCreate,
+    request: Request,
+    current_user: User = Depends(require_roles("Admin", "Auditor", "Management")),
+    db: Session = Depends(get_db),
+) -> DistributionRule:
+    rule = DistributionRule(
+        company_id=current_user.company_id,
+        created_by_user_id=current_user.id,
+        name=payload.name.strip(),
+        schedule_label=payload.schedule_label.strip(),
+        recipients=payload.recipients.strip(),
+        report_suite_id=payload.report_suite_id.strip(),
+        export_format=payload.export_format,
+        icon=payload.icon,
+        is_active=payload.is_active,
+    )
+    db.add(rule)
+    db.flush()
+
+    record_audit_history(
+        db,
+        company_id=current_user.company_id,
+        actor=current_user,
+        category="Mutation",
+        module="Governance Reports",
+        entity_type="DistributionRule",
+        entity_id=rule.id,
+        entity_ref=rule.report_suite_id,
+        action=f"Configured report distribution rule '{rule.name}' ({rule.schedule_label})",
+        changes={"recipients": rule.recipients, "export_format": rule.export_format},
+        request=request,
+    )
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@router.put("/reports/distributions/{rule_id}", response_model=DistributionRuleOut)
+def update_distribution_rule(
+    rule_id: UUID,
+    payload: DistributionRuleUpdate,
+    request: Request,
+    current_user: User = Depends(require_roles("Admin", "Auditor", "Management")),
+    db: Session = Depends(get_db),
+) -> DistributionRule:
+    rule = db.get(DistributionRule, rule_id)
+    if rule is None or rule.company_id != current_user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Distribution rule not found.")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(rule, field, value)
+
+    record_audit_history(
+        db,
+        company_id=current_user.company_id,
+        actor=current_user,
+        category="Mutation",
+        module="Governance Reports",
+        entity_type="DistributionRule",
+        entity_id=rule.id,
+        entity_ref=rule.report_suite_id,
+        action=f"Updated distribution rule '{rule.name}'",
+        changes=update_data,
+        request=request,
+    )
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@router.delete("/reports/distributions/{rule_id}", response_model=MessageResponse)
+def delete_distribution_rule(
+    rule_id: UUID,
+    request: Request,
+    current_user: User = Depends(require_roles("Admin", "Auditor", "Management")),
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    rule = db.get(DistributionRule, rule_id)
+    if rule is None or rule.company_id != current_user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Distribution rule not found.")
+
+    r_name = rule.name
+    record_audit_history(
+        db,
+        company_id=current_user.company_id,
+        actor=current_user,
+        category="Mutation",
+        module="Governance Reports",
+        entity_type="DistributionRule",
+        entity_id=rule.id,
+        entity_ref=rule.report_suite_id,
+        action=f"Deleted report distribution rule '{r_name}'",
+        request=request,
+    )
+    db.delete(rule)
+    db.commit()
+    return MessageResponse(detail=f"Distribution rule '{r_name}' deleted.")
+
+
+@router.post("/reports/ai-synthesis", response_model=AiSynthesisResponse)
+def run_ai_synthesis(
+    payload: AiSynthesisRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AiSynthesisResponse:
+    rate_limiter.check(client_rate_key(request, "ai_synthesis"), max_requests=15, window_seconds=60)
+    company = db.get(Company, current_user.company_id)
+    if company is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found.")
+
+    result = generate_grounded_ai_synthesis(
+        db,
+        company,
+        current_user,
+        payload.prompt,
+        domain=payload.domain,
+        request=request,
+    )
+    db.commit()
+    return AiSynthesisResponse(**result)
+
+
+@router.get("/reports/{report_id}/export")
+def export_report(
+    report_id: str,
+    format: Literal["csv", "xlsx", "pdf"] = Query(default="pdf"),
+    period: str = Query(default="Q4 2025"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    company = db.get(Company, current_user.company_id)
+    if company is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found.")
+
+    raw_bytes, media_type, filename = generate_report_export(
+        db,
+        company,
+        report_id,
+        format,
+        period=period,
+    )
+    return Response(
+        content=raw_bytes,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.get("/reports/{report_id}", response_model=ReportDetailOut)
 def get_report(
     report_id: str,
+    period: str = Query(default="Q4 2025"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ReportDetailOut:
     company = db.get(Company, current_user.company_id)
     if company is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found.")
-    return ReportDetailOut(**build_report_detail(db, company, report_id))
-
-
-@router.post("/reports/ai-synthesis", response_model=AiSynthesisResponse)
-def run_ai_synthesis(
-    payload: AiSynthesisRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> AiSynthesisResponse:
-    company = db.get(Company, current_user.company_id)
-    if company is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found.")
-    result = generate_grounded_ai_synthesis(db, company, payload.prompt, payload.domain)
-    return AiSynthesisResponse(**result)
+    detail = build_report_detail(db, company, report_id, period=period)
+    return ReportDetailOut(**{k: v for k, v in detail.items() if not k.startswith("_")})
 
 
 # ==================== NOTIFICATIONS ====================
@@ -336,6 +538,22 @@ def mark_all_notifications_read(
     return MessageResponse(detail=f"Marked {len(rows)} notification(s) as read.")
 
 
+@router.post("/notifications/run-sla-sweep", response_model=SlaSweepResultOut)
+def trigger_manual_sla_sweep(
+    request: Request,
+    current_user: User = Depends(require_roles("Admin", "Auditor")),
+    db: Session = Depends(get_db),
+) -> SlaSweepResultOut:
+    rate_limiter.check(client_rate_key(request, "sla_sweep"), max_requests=10, window_seconds=60)
+    company = db.get(Company, current_user.company_id)
+    if company is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found.")
+
+    summary = run_company_sla_sweep(db, company, actor=current_user)
+    db.commit()
+    return SlaSweepResultOut(**summary)
+
+
 # ==================== AUDIT HISTORY ====================
 
 
@@ -372,6 +590,14 @@ def list_audit_history(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/history/verify", response_model=AuditHistoryVerifyOut)
+def verify_audit_history_ledger(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AuditHistoryVerifyOut:
+    return AuditHistoryVerifyOut(**verify_company_history_chain(db, current_user.company_id))
 
 
 # ==================== DOMAIN TELEMETRY ====================
@@ -490,4 +716,3 @@ def get_domain_telemetry(
         projects=projects_out,
         customers=customers_out,
     )
-

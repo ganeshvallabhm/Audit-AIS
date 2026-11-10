@@ -45,6 +45,13 @@ class AuditScopeCreate(BaseModel):
     in_scope: bool = True
 
 
+class AuditScopeUpdate(BaseModel):
+    scope_name: str | None = Field(default=None, min_length=2, max_length=180)
+    system_or_process: str | None = Field(default=None, min_length=2, max_length=180)
+    regulatory_clause: str | None = Field(default=None, max_length=120)
+    in_scope: bool | None = None
+
+
 class AuditStageOut(BaseModel):
     name: str
     progress: int
@@ -134,6 +141,29 @@ class ChecklistOut(ORMBaseModel):
     version: str
     is_active: bool
     items: list[ChecklistItemOut] = Field(default_factory=list)
+
+
+class ChecklistCreate(BaseModel):
+    code: str | None = Field(default=None, min_length=3, max_length=32)
+    title: str = Field(..., min_length=3, max_length=200)
+    domain: AuditDomainLiteral
+    framework: str = Field(..., min_length=2, max_length=120)
+    version: str = Field(default="2025.4", min_length=1, max_length=24)
+
+
+class ChecklistItemCreate(BaseModel):
+    control_code: str = Field(..., min_length=2, max_length=40)
+    title: str = Field(..., min_length=3, max_length=255)
+    test_procedure: str = Field(..., min_length=5)
+    weight: float = Field(default=1.0, gt=0, le=10)
+    display_order: int = Field(default=1, ge=1)
+
+
+class ChecklistItemUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=3, max_length=255)
+    test_procedure: str | None = Field(default=None, min_length=5)
+    weight: float | None = Field(default=None, gt=0, le=10)
+    display_order: int | None = Field(default=None, ge=1)
 
 
 class AuditResponseOut(ORMBaseModel):

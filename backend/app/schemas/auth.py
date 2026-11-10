@@ -54,3 +54,8 @@ class UserUpdateRequest(BaseModel):
     is_active: bool | None = None
     certifications: list[str] | None = None
 
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=10, max_length=128)
+
+

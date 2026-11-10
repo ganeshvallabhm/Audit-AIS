@@ -4,7 +4,10 @@ import {
   BadgeCheck,
   CheckCircle2,
   Download,
+  Flag,
+  History,
   Lock,
+  Pencil,
   ShieldCheck,
   Upload,
   X,
@@ -17,7 +20,14 @@ import { StatusBadge } from '../components/ui/StatusBadge';
 import { useAuth } from '../context/AuthContext';
 import { ApiError, apiClient } from '../services/apiClient';
 import { auditService } from '../services/auditService';
-import { AuditOut, EvidenceOut, FindingOut, PaginatedResponse } from '../types/api';
+import {
+  AuditHistoryOut,
+  AuditOut,
+  EvidenceOut,
+  EvidenceUpdate,
+  FindingOut,
+  PaginatedResponse,
+} from '../types/api';
 import { EvidenceArtifact } from '../types/audit';
 
 interface EvidenceManagementPageProps {
@@ -30,6 +40,8 @@ interface UnifiedEvidenceRow {
   filename: string;
   sizeLabel: string;
   tag: string;
+  auditId: string | null;
+  findingId: string | null;
   auditCode: string;
   department: string;
   uploadedBy: string;
@@ -69,6 +81,20 @@ export const EvidenceManagementPage: React.FC<EvidenceManagementPageProps> = ({ 
   const [tagInput, setTagInput] = useState('SOC 2 Type II');
   const [uploading, setUploading] = useState(false);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [flaggingId, setFlaggingId] = useState<string | null>(null);
+
+  // Edit Metadata Modal
+  const [editingEvidence, setEditingEvidence] = useState<UnifiedEvidenceRow | null>(null);
+  const [editTag, setEditTag] = useState('');
+  const [editAuditId, setEditAuditId] = useState('');
+  const [editFindingId, setEditFindingId] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  // Custody History Modal
+  const [historyTarget, setHistoryTarget] = useState<UnifiedEvidenceRow | null>(null);
+  const [historyRows, setHistoryRows] = useState<AuditHistoryOut[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const fetchEvidence = useCallback(async () => {
     if (mode !== 'api') {
@@ -86,15 +112,13 @@ export const EvidenceManagementPage: React.FC<EvidenceManagementPageProps> = ({ 
       setApiArtifacts(evRes.items);
       setAudits(audRes.items);
       setFindings(fndRes.items);
-      if (!selectedAuditId && audRes.items.length > 0) {
-        setSelectedAuditId(audRes.items[0].id);
-      }
+      setSelectedAuditId((prev) => prev || (audRes.items[0]?.id ?? ''));
     } catch (err) {
       setErrorMsg(err instanceof ApiError ? err.detail : 'Failed to load evidence artifacts.');
     } finally {
       setLoading(false);
     }
-  }, [mode, selectedAuditId]);
+  }, [mode]);
 
   useEffect(() => {
     void fetchEvidence();
@@ -108,6 +132,8 @@ export const EvidenceManagementPage: React.FC<EvidenceManagementPageProps> = ({ 
         filename: e.original_filename,
         sizeLabel: formatByteSize(e.byte_size),
         tag: e.tag || 'Control Artifact',
+        auditId: e.audit_id,
+        findingId: e.finding_id,
         auditCode: e.audit_code || e.finding_code || 'Unlinked',
         department: e.department_name || 'Enterprise',
         uploadedBy: e.uploaded_by_name,
@@ -126,6 +152,8 @@ export const EvidenceManagementPage: React.FC<EvidenceManagementPageProps> = ({ 
       filename: a.filename,
       sizeLabel: a.size,
       tag: a.tag,
+      auditId: null,
+      findingId: null,
       auditCode: a.auditCode,
       department: a.department,
       uploadedBy: a.uploadedBy,
@@ -237,6 +265,76 @@ export const EvidenceManagementPage: React.FC<EvidenceManagementPageProps> = ({ 
       onNotify(err instanceof ApiError ? err.detail : 'Checksum verification failed.');
     } finally {
       setVerifyingId(null);
+    }
+  };
+
+  const handleFlag = async (ev: UnifiedEvidenceRow) => {
+    if (!canVerify || mode !== 'api') return;
+    setFlaggingId(ev.id);
+    try {
+      const updated = await apiClient.put<EvidenceOut>(`/evidence/${ev.id}/verify`, {
+        verification_status: 'Flagged',
+        verify_file_checksum: false,
+      });
+      onNotify(`Flagged ${updated.code} for evidence remediation or custodian follow-up.`);
+      await fetchEvidence();
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to flag evidence artifact.');
+    } finally {
+      setFlaggingId(null);
+    }
+  };
+
+  const openEditModal = (ev: UnifiedEvidenceRow) => {
+    setEditingEvidence(ev);
+    setEditTag(ev.tag);
+    setEditAuditId(ev.auditId || '');
+    setEditFindingId(ev.findingId || '');
+    setEditError(null);
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingEvidence || !canUpload || mode !== 'api') return;
+    setEditSaving(true);
+    setEditError(null);
+    try {
+      const payload: EvidenceUpdate = {
+        tag: editTag.trim() || null,
+      };
+      const nextAuditId = editAuditId || null;
+      const nextFindingId = editFindingId || null;
+      if (nextAuditId !== editingEvidence.auditId) {
+        payload.audit_id = nextAuditId;
+      }
+      if (nextFindingId !== editingEvidence.findingId) {
+        payload.finding_id = nextFindingId;
+      }
+      const updated = await apiClient.put<EvidenceOut>(`/evidence/${editingEvidence.id}`, payload);
+      setEditingEvidence(null);
+      onNotify(`Updated metadata and linkage for ${updated.code}.`);
+      await fetchEvidence();
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.detail : 'Failed to update evidence metadata.';
+      setEditError(msg);
+      onNotify(msg);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const openCustodyHistory = async (ev: UnifiedEvidenceRow) => {
+    if (mode !== 'api') return;
+    setHistoryTarget(ev);
+    setHistoryRows([]);
+    setHistoryLoading(true);
+    try {
+      const res = await apiClient.get<AuditHistoryOut[]>(`/evidence/${ev.id}/history`);
+      setHistoryRows(res);
+    } catch (err) {
+      onNotify(err instanceof ApiError ? err.detail : 'Failed to load custody history.');
+    } finally {
+      setHistoryLoading(false);
     }
   };
 
@@ -358,6 +456,39 @@ export const EvidenceManagementPage: React.FC<EvidenceManagementPageProps> = ({ 
                             <span>{verifyingId === ev.id ? 'Checking...' : 'Verify SHA-256'}</span>
                           </button>
                         )}
+                        {mode === 'api' && canVerify && ev.status !== 'Flagged' && (
+                          <button
+                            type="button"
+                            disabled={flaggingId === ev.id}
+                            onClick={() => void handleFlag(ev)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-error/30 text-error hover:bg-error-container/40 text-label-sm font-semibold transition-colors"
+                          >
+                            <Flag className="w-3.5 h-3.5" />
+                            <span>{flaggingId === ev.id ? 'Flagging...' : 'Flag'}</span>
+                          </button>
+                        )}
+                        {mode === 'api' && canUpload && (
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(ev)}
+                            className="p-2 rounded-lg bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-secondary transition-colors"
+                            aria-label={`Edit metadata for ${ev.code}`}
+                            title="Edit tag or linkage"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                        )}
+                        {mode === 'api' && (
+                          <button
+                            type="button"
+                            onClick={() => void openCustodyHistory(ev)}
+                            className="p-2 rounded-lg bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-secondary transition-colors"
+                            aria-label={`View custody history for ${ev.code}`}
+                            title="Custody History"
+                          >
+                            <History className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => void handleDownload(ev)}
@@ -375,6 +506,166 @@ export const EvidenceManagementPage: React.FC<EvidenceManagementPageProps> = ({ 
           </div>
         )}
       </div>
+
+      {/* Edit Evidence Metadata Modal */}
+      {editingEvidence && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-primary/40 backdrop-blur-[2px]"
+            onClick={() => setEditingEvidence(null)}
+          />
+          <form
+            onSubmit={handleSaveEdit}
+            className="relative w-full max-w-lg bg-surface-container-lowest rounded-xl border border-border-hairline shadow-exec-lg overflow-hidden z-10"
+          >
+            <div className="px-6 py-4 bg-surface-container-low border-b border-border-hairline flex items-center justify-between">
+              <div>
+                <span className="font-mono text-label-sm font-bold text-secondary">{editingEvidence.code}</span>
+                <h2 className="text-headline-lg text-primary font-bold">Edit Evidence Metadata &amp; Linkage</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingEvidence(null)}
+                className="p-1.5 text-outline hover:text-on-surface rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              {editingEvidence.status === 'Verified' && (
+                <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-body-sm flex items-start gap-2">
+                  <Lock className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    This artifact is <strong>Verified</strong>. While Enterprise SHA-256 Lock is active in
+                    Governance Settings, modifying audit or finding linkage is blocked by the server.
+                  </span>
+                </div>
+              )}
+              {editError && (
+                <div className="p-3 rounded-lg bg-error-container text-on-error-container border border-error/25 text-body-sm flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-error shrink-0 mt-0.5" />
+                  <span>{editError}</span>
+                </div>
+              )}
+              <div>
+                <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                  Control / Framework Tag
+                </label>
+                <input
+                  type="text"
+                  value={editTag}
+                  onChange={(e) => setEditTag(e.target.value)}
+                  className="w-full h-10 px-3.5 rounded-lg border border-border-hairline text-body-md focus:outline-none focus:border-secondary"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                    Linked Audit
+                  </label>
+                  <select
+                    value={editAuditId}
+                    onChange={(e) => setEditAuditId(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg border border-border-hairline text-body-sm bg-surface-container-lowest"
+                  >
+                    <option value="">None</option>
+                    {audits.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.code} — {a.title.slice(0, 26)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-label-md uppercase text-on-surface-variant mb-1.5">
+                    Linked Finding
+                  </label>
+                  <select
+                    value={editFindingId}
+                    onChange={(e) => setEditFindingId(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg border border-border-hairline text-body-sm bg-surface-container-lowest"
+                  >
+                    <option value="">None</option>
+                    {findings.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.code} — {f.title.slice(0, 26)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div className="px-6 py-4 bg-surface-container-low border-t border-border-hairline flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setEditingEvidence(null)}
+                className="h-10 px-4 rounded-lg border border-border-hairline bg-surface-container-lowest text-label-lg text-on-surface-variant"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={editSaving}
+                className="h-10 px-4 rounded-lg bg-secondary text-on-secondary text-label-lg hover:bg-secondary-container disabled:opacity-60"
+              >
+                {editSaving ? 'Saving...' : 'Save Metadata'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Evidence Custody History Modal */}
+      {historyTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-primary/40 backdrop-blur-[2px]"
+            onClick={() => setHistoryTarget(null)}
+          />
+          <div className="relative w-full max-w-2xl bg-surface-container-lowest rounded-xl border border-border-hairline shadow-exec-lg overflow-hidden z-10 max-h-[85vh] flex flex-col">
+            <div className="px-6 py-4 bg-surface-container-low border-b border-border-hairline flex items-center justify-between">
+              <div>
+                <span className="font-mono text-label-sm font-bold text-secondary">{historyTarget.code}</span>
+                <h2 className="text-headline-lg text-primary font-bold">Chain-of-Custody History</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHistoryTarget(null)}
+                className="p-1.5 text-outline hover:text-on-surface rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto space-y-3">
+              {historyLoading ? (
+                <p className="text-body-sm text-outline">Loading cryptographic custody ledger...</p>
+              ) : historyRows.length === 0 ? (
+                <p className="text-body-sm text-outline">No custody events logged yet for {historyTarget.code}.</p>
+              ) : (
+                historyRows.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="p-4 rounded-xl bg-surface-container-low/70 border border-border-hairline space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-label-lg font-bold text-on-surface">{entry.action}</span>
+                      <span className="font-mono text-label-sm text-outline">
+                        {new Date(entry.created_at).toISOString().replace('T', ' ').slice(0, 19)} UTC
+                      </span>
+                    </div>
+                    <div className="text-body-sm text-on-surface-variant">
+                      Actor: <strong>{entry.actor_label}</strong> ({entry.actor_role})
+                    </div>
+                    <div className="font-mono text-[11px] text-outline truncate">
+                      Event SHA-256: {entry.event_sha256}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Multipart Upload Modal */}
       {uploadOpen && (
