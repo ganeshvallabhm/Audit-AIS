@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: companyaudit-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-companyaudit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before starting}
+      POSTGRES_DB: ${POSTGRES_DB:-companyaudit}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - companyaudit_pgdata:/var/lib/postgresql/data
+      - ./backend/scripts/init-test-db.sql:/docker-entrypoint-initdb.d/01-init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-companyaudit} -d $${POSTGRES_DB:-companyaudit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  companyaudit_pgdata:
