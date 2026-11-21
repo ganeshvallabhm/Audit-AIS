@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: io.companyaudit.platform.service.Phase2MasterDataAndTemplatesTest
+-------------------------------------------------------------------------------
+Tests run: 20, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.153 s -- in io.companyaudit.platform.service.Phase2MasterDataAndTemplatesTest

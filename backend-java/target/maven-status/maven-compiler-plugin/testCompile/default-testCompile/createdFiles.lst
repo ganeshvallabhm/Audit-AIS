@@ -1,0 +1,14 @@
+io\companyaudit\platform\security\AuthenticationSecurityTest.class
+io\companyaudit\platform\CryptographicParityTest$Argon2idTests.class
+io\companyaudit\platform\CompanyAuditApplicationTests.class
+io\companyaudit\platform\security\AuthenticationSecurityTest$JwtValidationTests.class
+io\companyaudit\platform\CryptographicParityTest$AuditHashChainTests.class
+io\companyaudit\platform\security\AuthenticationSecurityTest$CsrfAndOriginTests.class
+io\companyaudit\platform\service\Phase2MasterDataAndTemplatesTest.class
+io\companyaudit\platform\service\Phase3AuditExecutionAndScoringTest.class
+io\companyaudit\platform\CryptographicParityTest.class
+io\companyaudit\platform\security\AuthenticationSecurityTest$MultiTenantAndRbacTests.class
+io\companyaudit\platform\security\AuthenticationSecurityTest$LoginTests.class
+io\companyaudit\platform\security\AuthenticationSecurityTest$RefreshTokenTests.class
+io\companyaudit\platform\AuditHashParityTest.class
+io\companyaudit\platform\service\Phase4GovernanceAndEvidenceTest.class

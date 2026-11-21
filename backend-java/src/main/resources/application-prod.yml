@@ -1,0 +1,24 @@
+server:
+  port: 8000
+
+spring:
+  datasource:
+    url: jdbc:postgresql://db:5432/${POSTGRES_DB:companyaudit}
+    username: ${POSTGRES_USER:companyaudit}
+    password: ${POSTGRES_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: "2"
+
+app:
+  environment: production
+  security:
+    cookie-secure: true
+  storage:
+    evidence-dir: /app/storage/evidence
+  ai:
+    service-url: http://ai-service:5000

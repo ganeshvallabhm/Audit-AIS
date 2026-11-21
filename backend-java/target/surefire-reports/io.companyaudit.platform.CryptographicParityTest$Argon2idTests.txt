@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: io.companyaudit.platform.CryptographicParityTest$Argon2idTests
+-------------------------------------------------------------------------------
+Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.969 s -- in io.companyaudit.platform.CryptographicParityTest$Argon2idTests

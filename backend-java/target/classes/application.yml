@@ -1,0 +1,85 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: companyaudit-platform-api
+  threads:
+    virtual:
+      enabled: false  # Disabled on Java 17 LTS; enable when migrating runtime to Java 21 LTS
+
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5433/companyaudit}
+    username: ${POSTGRES_USER:companyaudit}
+    password: ${POSTGRES_PASSWORD:companyaudit}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      pool-name: CompanyAuditHikariCP
+      connection-test-query: SELECT 1
+
+  jpa:
+    database: postgresql
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: validate   # STRICT: Validates existing schema; does NOT alter tables
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          batch_size: 50
+          order_inserts: true
+          order_updates: true
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: "2"
+    baseline-description: "Alembic Phase 4 Baseline"
+    locations: classpath:db/migration
+
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 28MB
+      max-request-size: 28MB
+
+app:
+  name: "CompanyAudit Enterprise API"
+  api-prefix: "/api"
+  environment: ${ENVIRONMENT:development}
+  
+  security:
+    jwt-secret-key: ${JWT_SECRET_KEY:default_insecure_key_for_development_replace_in_prod_at_least_32_chars}
+    jwt-algorithm: HS256
+    access-token-expire-minutes: ${ACCESS_TOKEN_EXPIRE_MINUTES:30}
+    refresh-token-expire-days: ${REFRESH_TOKEN_EXPIRE_DAYS:7}
+    cookie-secure: ${COOKIE_SECURE:false}
+    cors-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:4173,http://127.0.0.1:4173}
+
+  storage:
+    evidence-dir: ${EVIDENCE_STORAGE_DIR:./storage/evidence}
+    max-evidence-bytes: ${MAX_EVIDENCE_BYTES:26214400}
+
+  scheduler:
+    enabled: ${ENABLE_BACKGROUND_SCHEDULER:true}
+    interval-seconds: ${SCHEDULER_INTERVAL_SECONDS:900}
+
+  ai:
+    service-url: ${AI_SERVICE_URL:http://localhost:5000}
+    provider: ${AI_PROVIDER:}
+    api-key: ${AI_API_KEY:}
+    model: ${AI_MODEL:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when_authorized
